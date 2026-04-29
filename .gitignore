@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Environment
+.env
+.env.*
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LFSpoolfile
+
+# Claude Code
+CLAUDE.md
+AGENTS.md
+.claude/
+
+# pytest
+.pytest_cache/
+
+# Large training artifacts (re-downloadable from GCS)
+artifacts/cfg-run/checkpoints/
+artifacts/cfg-run/denoising*.gif
+artifacts/harness_baseline/
+
+# Jupyter
+.ipynb_checkpoints/

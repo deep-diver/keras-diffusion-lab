@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffusion-harness"
+version = "0.1.0"
+description = "Diffusion model research harness built on Keras 3 + JAX + Keras Kinetic"
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.4.30",
+    "keras>=3.0",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pillow",
+    "matplotlib",
+]
+kinetic = [
+    "keras-kinetic",
+]
+gcs = [
+    "google-cloud-storage",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
