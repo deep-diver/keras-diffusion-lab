@@ -1,36 +1,32 @@
-# Decision 006: Attention Placement Inconsistency Between Methods
+# Decision 006: Attention Placement — Resolved (Both Models Identical)
 
 ## Status
-Accepted (technical debt)
+Resolved (was a documentation error, not an architectural difference)
 
 ## Date
-2026-04-29
+2026-04-29 (identified), 2026-04-30 (resolved)
 
 ## Context
-The unconditional model and conditional model use different self-attention placements in their U-Net architectures:
+The unconditional model and conditional model were documented as using different self-attention placements:
 
-| Model | Attention Resolutions | Spatial Sizes |
-|-------|----------------------|---------------|
-| Unconditional | `(0,)` | Level 0 only (28x28) |
-| Conditional | `(1, 2)` | Levels 1 and 2 (14x14, 7x7) |
+| Model | Documented | Actual |
+|-------|-----------|--------|
+| Unconditional | `(0,)` (level 0 only) | `(1, 2)` (levels 1, 2) |
+| Conditional | `(1, 2)` (levels 1, 2) | `(1, 2)` (levels 1, 2) |
 
-This was not a deliberate design choice. The unconditional model was built first with `attention_resolutions=(0,)` (attention at the highest resolution). When the conditional model was added, the default config changed to `attention_resolutions=(1, 2)` following a different convention.
+Both models were actually trained with identical architecture: `attention_resolutions=(1, 2)`, `num_levels=3`, `channel_multipliers=(1, 2, 2)`, `base_filters=128`.
 
-## Why This Matters
-Any comparison between unconditional and conditional results is confounded by this architectural difference. If the conditional model produces better/worse images, we cannot attribute this solely to CFG conditioning — the attention placement also changed.
+The perceived inconsistency arose because the post-restructure config defaults were changed to `attention_resolutions=(0,)` for the unconditional method, but this did NOT match the actual checkpoints. The checkpoints were created by the pre-restructure code which used `(1, 2)` for both.
 
-Attention at level 0 (28x28) operates on 784 spatial positions (computationally expensive but captures global structure). Attention at levels 1,2 (14x14, 7x7) operates on 196+49 positions (cheaper but more local).
+## How It Was Discovered
+When attempting to resume training on v5litepod-8, checkpoint loading failed with shape mismatches. Inspecting the checkpoint `.weights.h5` files revealed that both models have 5 self-attention layers (encoder × 2 + bottleneck × 1 + decoder × 2), all with 256 channels — exactly matching `attention_resolutions=(1, 2)` with `num_levels=3`.
 
-## Decision
-Accept the inconsistency for now. Document it as a known confound. Prioritize shipping over running a controlled ablation.
-
-## Alternatives Considered
-1. **Retrain conditional with attention_resolutions=(0,)** — Controlled comparison. Con: requires another 15K steps of TPU time (~7 hours).
-2. **Retrain unconditional with attention_resolutions=(1,2)** — Same issue, different direction.
-3. **Accept and document (chosen)** — Move forward with the current models, note the confound in the experiment report.
-4. **Run both configs and compare** — Most rigorous. Con: doubles compute cost.
+## Resolution
+1. Corrected config defaults to `attention_resolutions=(1, 2)` to match the actual trained models
+2. Removed custom layer names from `build_unet` and `build_cond_unet` to match checkpoint naming (Keras auto-generated names)
+3. Decision 006's original concern (unfair comparison) is moot — both models always had identical architecture
 
 ## Consequences
-- The CFG blog post's class differentiation results cannot be directly compared to the unconditional blog post's quality results. This should be noted whenever comparing the two models.
-- For future experiments, the attention placement should be explicitly controlled. Consider standardizing on one placement or running ablations.
-- The `make_config()` defaults should be reviewed to ensure `attention_resolutions` is intentionally chosen, not accidentally inherited.
+- The unconditional vs conditional comparison IS fair — same architecture, same attention placement
+- The CFG effect can be attributed to the conditioning method alone, not to an architectural confound
+- The `make_config()` defaults now correctly reflect the actual training configuration

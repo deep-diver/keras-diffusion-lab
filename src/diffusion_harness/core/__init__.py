@@ -17,7 +17,7 @@ def make_config(
     base_filters: int = 128,
     num_levels: int = 3,
     channel_multipliers: tuple = (1, 2, 2),
-    attention_resolutions: tuple = (0,),
+    attention_resolutions: tuple = (1, 2),
     # Diffusion
     num_timesteps: int = 1000,
     schedule_type: str = "linear",

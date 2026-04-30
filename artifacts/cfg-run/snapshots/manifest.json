@@ -1,0 +1,202 @@
+[
+  {
+    "step": 500,
+    "loss": 0.06317415833473206,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step000500.npy"
+  },
+  {
+    "step": 1000,
+    "loss": 0.037124987691640854,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step001000.npy"
+  },
+  {
+    "step": 1500,
+    "loss": 0.03310362622141838,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step001500.npy"
+  },
+  {
+    "step": 2000,
+    "loss": 0.038709718734025955,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step002000.npy"
+  },
+  {
+    "step": 2500,
+    "loss": 0.05291390419006348,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step002500.npy"
+  },
+  {
+    "step": 3000,
+    "loss": 0.062035273760557175,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step003000.npy"
+  },
+  {
+    "step": 3500,
+    "loss": 0.048680514097213745,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step003500.npy"
+  },
+  {
+    "step": 4000,
+    "loss": 0.04172350838780403,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step004000.npy"
+  },
+  {
+    "step": 4500,
+    "loss": 0.04267077520489693,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step004500.npy"
+  },
+  {
+    "step": 5000,
+    "loss": 0.02602088637650013,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step005000.npy"
+  },
+  {
+    "step": 5000,
+    "loss": 0.02602088637650013,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step005000.npy"
+  },
+  {
+    "step": 5500,
+    "loss": 0.054054535925388336,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step005500.npy"
+  },
+  {
+    "step": 6000,
+    "loss": 0.0318957082927227,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step006000.npy"
+  },
+  {
+    "step": 6500,
+    "loss": 0.0464034378528595,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step006500.npy"
+  },
+  {
+    "step": 6500,
+    "loss": 0.03937988728284836,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step006500.npy"
+  },
+  {
+    "step": 7000,
+    "loss": 0.03334164619445801,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step007000.npy"
+  },
+  {
+    "step": 7500,
+    "loss": 0.04290636628866196,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step007500.npy"
+  },
+  {
+    "step": 8000,
+    "loss": 0.02852020226418972,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step008000.npy"
+  },
+  {
+    "step": 8500,
+    "loss": 0.039904121309518814,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step008500.npy"
+  },
+  {
+    "step": 9000,
+    "loss": 0.045590564608573914,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step009000.npy"
+  },
+  {
+    "step": 9500,
+    "loss": 0.05761290341615677,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step009500.npy"
+  },
+  {
+    "step": 10000,
+    "loss": 0.03849982097744942,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step010000.npy"
+  },
+  {
+    "step": 10500,
+    "loss": 0.04314601048827171,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step010500.npy"
+  },
+  {
+    "step": 11000,
+    "loss": 0.035660985857248306,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step011000.npy"
+  },
+  {
+    "step": 11500,
+    "loss": 0.04322899878025055,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step011500.npy"
+  },
+  {
+    "step": 12000,
+    "loss": 0.03077828139066696,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step012000.npy"
+  },
+  {
+    "step": 12500,
+    "loss": 0.03463653847575188,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step012500.npy"
+  },
+  {
+    "step": 13000,
+    "loss": 0.03220459818840027,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step013000.npy"
+  },
+  {
+    "step": 13500,
+    "loss": 0.043185487389564514,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step013500.npy"
+  },
+  {
+    "step": 14000,
+    "loss": 0.0318969264626503,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step014000.npy"
+  },
+  {
+    "step": 14500,
+    "loss": 0.03473810479044914,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step014500.npy"
+  },
+  {
+    "step": 14700,
+    "loss": 0.0474323034286499,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step014700.npy"
+  },
+  {
+    "step": 14700,
+    "loss": 0.03995447978377342,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step014700.npy"
+  },
+  {
+    "step": 14800,
+    "loss": 0.04012017697095871,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step014800.npy"
+  },
+  {
+    "step": 14800,
+    "loss": 0.03766545280814171,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step014800.npy"
+  },
+  {
+    "step": 14900,
+    "loss": 0.03874872252345085,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step014900.npy"
+  },
+  {
+    "step": 15000,
+    "loss": 0.042527616024017334,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step015000.npy"
+  },
+  {
+    "step": 16000,
+    "loss": 0.036255523562431335,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step016000.npy"
+  },
+  {
+    "step": 17000,
+    "loss": 0.04168562963604927,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step017000.npy"
+  },
+  {
+    "step": 18000,
+    "loss": 0.0305339265614748,
+    "path": "gs://gcp-ml-172005-ddpm-training/cfg-fashionmnist-5k/run01/snapshots/samples_step018000.npy"
+  }
+]

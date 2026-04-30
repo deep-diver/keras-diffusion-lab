@@ -164,37 +164,36 @@ def build_unet(image_size=28, channels=1, base_filters=128,
     skips = []
     for level in range(num_levels):
         filters = base_filters * channel_multipliers[level]
-        h = ResBlock(filters, name=f"enc_{level}_0")(h, t_mlp)
-        h = ResBlock(filters, name=f"enc_{level}_1")(h, t_mlp)
+        h = ResBlock(filters)(h, t_mlp)
+        h = ResBlock(filters)(h, t_mlp)
 
         if level in attention_resolutions:
-            h = SelfAttention(name=f"enc_attn_{level}")(h)
+            h = SelfAttention()(h)
 
         skips.append(h)
 
         if level < num_levels - 1:
-            h = Downsample(name=f"down_{level}")(h)
+            h = Downsample()(h)
 
     # Bottleneck
     bn_filters = base_filters * channel_multipliers[-1]
-    h = ResBlock(bn_filters, name="bn_0")(h, t_mlp)
-    h = SelfAttention(name="bn_attn")(h)
-    h = ResBlock(bn_filters, name="bn_1")(h, t_mlp)
+    h = ResBlock(bn_filters)(h, t_mlp)
+    h = SelfAttention()(h)
+    h = ResBlock(bn_filters)(h, t_mlp)
 
     # Decoder
     for level in reversed(range(num_levels)):
         filters = base_filters * channel_multipliers[level]
         skip = skips[level]
-        h = layers.Concatenate(name=f"cat_{level}")([h, skip])
-        h = ResBlock(filters, name=f"dec_{level}_0")(h, t_mlp)
-        h = ResBlock(filters, name=f"dec_{level}_1")(h, t_mlp)
+        h = layers.Concatenate()([h, skip])
+        h = ResBlock(filters)(h, t_mlp)
+        h = ResBlock(filters)(h, t_mlp)
 
         if level in attention_resolutions:
-            h = SelfAttention(name=f"dec_attn_{level}")(h)
+            h = SelfAttention()(h)
 
         if level > 0:
-            h = Upsample(base_filters * channel_multipliers[level - 1],
-                         name=f"up_{level}")(h)
+            h = Upsample(base_filters * channel_multipliers[level - 1])(h)
 
     # Output
     h = layers.GroupNormalization(8)(h)

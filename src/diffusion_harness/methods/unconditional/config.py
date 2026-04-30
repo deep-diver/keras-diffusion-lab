@@ -5,7 +5,7 @@ UNCONDITIONAL_DEFAULTS = {
     "base_filters": 128,
     "num_levels": 3,
     "channel_multipliers": (1, 2, 2),
-    "attention_resolutions": (0,),
+    "attention_resolutions": (1, 2),
     "ema_decay": 0.999,
     "learning_rate": 2e-4,
     "num_timesteps": 1000,

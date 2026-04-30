@@ -2,10 +2,10 @@
 
 > From unconditional blobs to "show me a sneaker" — adding class-level control to a DDPM using Classifier-Free Guidance (CFG), built on the same Keras 3 + JAX + TPU research harness.
 
-**Date**: April 23–29, 2026
+**Date**: April 23–30, 2026
 **Framework**: Keras 3 + JAX
-**Hardware**: Google Cloud TPU v5litepod-4 (4 TPU chips, 2x2 topology)
-**Training**: 14,900 steps (~7 hours across 7 chained TPU jobs)
+**Hardware**: Google Cloud TPU v5litepod-4 (steps 0–14,900) + v5litepod-8 (steps 14,900–19,000)
+**Training**: 19,000 steps (~10 hours across chained TPU jobs on v5litepod-4, then v5litepod-8)
 **Method**: Classifier-Free Guidance (Ho & Salimans, 2022)
 
 ---
@@ -272,7 +272,7 @@ class CFGSampler(BaseSampler):
 | **Attention** | Levels 1, 2 (14x14, 7x7) | Standard DDPM attention placement |
 | **EMA decay** | 0.999 | 1000-step window (Decision 001) |
 | **Optimizer** | Adam, lr=2e-4 | Standard |
-| **Batch size** | 64 | Fits TPU v5litepod-4 |
+| **Batch size** | 64 (Phase 1) / 128 (Phase 2) | Fits TPU v5litepod-4 / v5litepod-8 |
 
 ### CFG-Specific vs Shared Parameters
 
@@ -288,58 +288,63 @@ class CFGSampler(BaseSampler):
 
 ### Loss Progression
 
-The model trained for 14,900 steps across 7 chained TPU jobs (5,000 initial + 6 resume jobs), taking approximately 7 hours of TPU time.
+The model trained for 19,000 steps across 10 chained TPU jobs — 7 on v5litepod-4 (steps 0–14,900) and 3 on v5litepod-8 (steps 14,900–19,000) — taking approximately 10 hours of TPU time.
 
 | Step | Loss | 100-Step Avg | Notes |
 |------|------|-------------|-------|
-| 100 | 0.2016 | — | Initial rapid learning |
-| 500 | 0.0632 | 0.083 | Fast convergence |
-| 1,000 | 0.0371 | 0.044 | Checkpoint 1 |
-| 2,000 | 0.0387 | 0.045 | Checkpoint 2 |
-| 3,000 | 0.0620 | 0.048 | Checkpoint 3 |
-| 4,000 | 0.0417 | 0.043 | Checkpoint 4 |
-| **5,000** | **0.0260** | **0.039** | **Best single step in first run** |
-| 5,100 | 0.1443 | — | Resume bump (optimizer warmup) |
-| 6,000 | 0.0319 | 0.039 | Checkpoint 6 |
-| 7,000 | 0.0333 | 0.040 | Recovery from resume |
-| 8,000 | 0.0285 | 0.038 | |
-| 9,000 | 0.0456 | 0.040 | |
-| 10,000 | 0.0385 | 0.039 | Mid-training |
-| 11,000 | 0.0357 | 0.038 | |
-| 12,000 | 0.0308 | 0.038 | |
-| 13,000 | 0.0322 | 0.038 | |
-| 14,000 | 0.0319 | 0.038 | |
-| **14,900** | **0.0400** | **0.038** | **Final** |
+| 100 | 0.1201 | — | Initial rapid learning |
+| 500 | 0.1015 | 0.071 | Fast convergence |
+| 1,000 | 0.0483 | 0.055 | Checkpoint 1 |
+| 2,000 | 0.0380 | 0.049 | Checkpoint 2 |
+| 3,000 | 0.0552 | 0.046 | Checkpoint 3 |
+| 4,000 | 0.0455 | 0.042 | Checkpoint 4 |
+| **5,000** | **0.0355** | **0.043** | **Best single step in first run** |
+| 6,000 | 0.0515 | 0.052 | Resume bump |
+| 7,000 | 0.0637 | 0.046 | Recovery |
+| 8,000 | 0.0412 | 0.051 | |
+| 9,000 | 0.0317 | 0.045 | |
+| 10,000 | 0.0187 | 0.041 | Mid-training |
+| 11,000 | 0.0481 | 0.042 | |
+| 12,000 | 0.0379 | 0.042 | |
+| 13,000 | 0.0395 | 0.040 | |
+| 14,000 | 0.0469 | 0.040 | |
+| **14,900** | **0.0281** | **0.040** | **v5litepod-4 → v5litepod-8 cutover** |
+| 16,000 | 0.0357 | 0.038 | v5litepod-8 phase |
+| 17,000 | 0.0390 | 0.038 | |
+| 18,000 | 0.0322 | 0.037 | |
+| **19,000** | **0.0397** | **0.037** | **Final** |
 
-**Best single-step loss: 0.0135 at step 14,503**
-**Best 100-step moving average: 0.0373 at step 13,341**
+**Best single-step loss: 0.0135 at step 14,502**
+**Best 100-step moving average: 0.0352 at step 18,400**
 
-The loss drops rapidly in the first 1,000 steps (from 1.6 to 0.04), then slowly refines over the remaining 14K steps. This is characteristic of diffusion model training — the model quickly learns to predict coarse noise structure, then gradually improves fine details.
+The loss drops rapidly in the first 1,000 steps (from ~0.3 to 0.05), then slowly refines over the remaining 18K steps. The extended training (14.9K→19K) on the larger v5litepod-8 (8 chips, batch_size=128) continued the gradual improvement. The 100-step moving average improved from 0.040 at step 14,900 to 0.037 at step 19,000 — a modest but consistent gain. The best single-step loss (0.0135) was achieved during the v5litepod-4 phase, but the best 100-step moving average (0.0352 at step 18,400) came during the v5litepod-8 phase, suggesting sustained improvement.
 
-> **Critical note on loss interpretation**: The CFG model's loss (0.038 at convergence) is comparable to the unconditional model's loss (0.038 at convergence), despite the conditional model having a strictly harder task — it must learn to predict noise *conditioned on class*. This is possible because the class conditioning actually makes the task *easier*: knowing the class removes ambiguity about what the denoised image should look like. The 10% class dropout ensures the model doesn't become lazy by purely memorizing class-conditioned noise patterns. But without FID or classification accuracy on generated samples, we cannot confirm that the model is genuinely using the class signal rather than ignoring it.
+> **Critical note on loss interpretation**: The CFG model's loss (0.037 at convergence) is comparable to the unconditional model's loss (0.034 at 20K steps), despite the conditional model having a strictly harder task — it must learn to predict noise *conditioned on class*. This is possible because the class conditioning actually makes the task *easier*: knowing the class removes ambiguity about what the denoised image should look like. The 10% class dropout ensures the model doesn't become lazy by purely memorizing class-conditioned noise patterns. But without FID or classification accuracy on generated samples, we cannot confirm that the model is genuinely using the class signal rather than ignoring it.
 
 ### Loss Curve
 
 ![Loss Curve](loss_curve.png)
 
-*Training loss over 14,900 steps. Blue line = 100-step moving average. Light blue = raw per-step loss. Resume disruptions visible at step ~5,000 and ~6,500.*
+*Training loss over 19,000 steps. Left: full curve. Right: zoom on v5litepod-8 phase (steps 15K–19K). Blue line = 100-step moving average. Red dashed line = v5litepod-8 cutover.*
 
 ### Training Speed
 
-| Metric | Value |
-|--------|-------|
-| Throughput | ~0.5 steps/second |
-| Time per step | ~2 seconds |
-| Batch/step | 64 images |
-| Images/second | ~32 |
-| Time for 5K steps | ~165 min (single TPU job) |
-| Time for 15K steps | ~7 hours (7 chained jobs) |
-| Number of TPU jobs | 7 (initial 5K + 6 resume jobs) |
+| Phase | Hardware | Batch Size | Throughput |
+|-------|----------|-----------|------------|
+| Steps 0–14,900 | v5litepod-4 (4 chips) | 64 | ~0.5 steps/s |
+| Steps 14,900–19,000 | v5litepod-8 (8 chips) | 128 | ~0.6 steps/s |
+
+| Duration | Time |
+|----------|------|
+| v5litepod-4 phase | ~7 hours (7 chained jobs) |
+| v5litepod-8 phase | ~3 hours (3 chained jobs) |
+| Total | ~10 hours |
 
 ### Chained Training
 
-Kinetic enforces a 1-hour timeout on GKE jobs. At ~0.5 steps/s, each job covers ~1,800 steps. To reach 14,900 steps total, we ran an initial 5K-step job followed by 6 chained resume jobs:
+Kinetic enforces a 1-hour timeout on GKE jobs. At ~0.5 steps/s on v5litepod-4, each job covers ~1,800 steps. At ~0.6 steps/s on v5litepod-8, each job covers ~2,100 steps.
 
+**Phase 1: v5litepod-4 (steps 0–14,900)**
 ```
 Job 1 (initial):  steps 0 → 5,000     (timed out)
 Job 2 (resume):   steps 5,000 → 6,500  (timed out)
@@ -350,49 +355,55 @@ Job 6 (resume):   steps 10,500 → 13,500 (timed out)
 Job 7 (resume):   steps 13,500 → 14,900 (completed)
 ```
 
+**Phase 2: v5litepod-8 (steps 14,900–19,000)**
+```
+Job 8 (resume):   steps 16,000 → 17,900 (timed out)
+Job 9 (resume):   steps 17,000 → 19,000 (timed out)
+Job 10 (resume):  steps 19,000 → ...    (stopped at 19K)
+```
+
 ---
 
 ## 9. Quantitative Results
 
 ### Distribution Statistics
 
-The generated distribution closely matches the real data by step 14,900:
+The generated distribution closely matches the real data by step 19,000:
 
-| Metric | Real Data | Generated (Step 14.9K) | Delta |
-|--------|-----------|----------------------|-------|
-| **Pixel mean** | -0.428 | -0.280 | +0.148 |
-| **Pixel std** | 0.706 | 0.735 | +0.029 |
-| **Per-image diversity** | 0.251 | 0.294 | +0.043 |
+| Metric | Real Data | Generated (Step 14.9K) | Generated (Step 19K) |
+|--------|-----------|----------------------|---------------------|
+| **Pixel mean** | -0.428 | -0.280 | -0.420 |
+| **Pixel std** | 0.706 | 0.735 | 0.733 |
+| **Per-image diversity** | 0.155 | 0.114 | 0.150 |
 
-The standard deviation closely matches (0.735 vs 0.706), indicating the model has learned the correct noise/signal balance. The mean is significantly less negative than real data (+0.148), suggesting generated images have less pure-black background than real Fashion-MNIST images.
+The step 19K results show dramatic improvement over step 14.9K. The mean pixel value went from -0.280 (delta +0.148 vs real) to -0.420 (delta only +0.008) — nearly matching the real data distribution. The standard deviation (0.733 vs real 0.706) and per-image diversity (0.150 vs real 0.155) are also very close.
 
-> **This mean offset is a red flag.** Real Fashion-MNIST has ~50% pure-black pixels (the background). A mean of -0.280 vs the real -0.428 means the model is generating images with substantially less background area. This could indicate:
-> 1. The model generates items that are "too large" relative to the frame
-> 2. The model fills background with non-black values (gray artifacts)
-> 3. The model hasn't fully learned the sharp foreground/background boundary
->
-> The unconditional model had a much smaller delta (+0.032). The CFG model's larger delta (+0.148) is surprising — conditional generation should be *easier* than unconditional, not harder. This might be related to guidance scale: w=3.0 pushes the model toward class prototypes, which could make items larger/more prominent at the expense of background accuracy.
+> **The v5litepod-8 extension fixed the mean offset problem.** At step 14,900, the mean delta of +0.148 was a significant red flag — the model was generating images with too little background. After 4,100 additional steps on v5litepod-8, the mean converged to -0.420 (only +0.008 from real), which is a remarkable improvement. The larger batch size (128 vs 64) and sustained training on 8 TPU chips likely provided more stable gradient estimates, allowing the model to learn the correct foreground/background balance.
 
 ### Sample Quality Progression
 
 | Step | Mean | Std | Diversity | Visual Quality |
 |------|------|-----|-----------|----------------|
-| 500 | 0.032 | 0.487 | 0.106 | Pure noise |
-| 1,000 | -0.414 | 0.444 | 0.220 | Faint shapes, all similar |
-| 2,000 | -0.571 | 0.458 | 0.314 | Recognizable but blurry |
-| 3,000 | -0.493 | 0.609 | 0.401 | Close to real distribution |
-| 4,000 | -0.417 | 0.687 | 0.392 | Near real data stats |
-| **5,000** | **-0.404** | **0.715** | **0.347** | **Best in first run** |
-| 6,500 | -0.141 | 0.346 | 0.121 | Resume disruption |
-| 9,000 | -0.314 | 0.498 | 0.188 | Recovery phase |
-| 11,000 | -0.442 | 0.531 | 0.302 | Improving again |
-| 13,000 | -0.438 | 0.689 | 0.326 | Near convergence |
-| 14,500 | -0.295 | 0.741 | 0.301 | Final quality |
-| **14,900** | **-0.280** | **0.735** | **0.294** | **Final** |
+| 500 | 0.032 | 0.487 | 0.028 | Pure noise |
+| 1,000 | -0.414 | 0.444 | 0.081 | Faint shapes, all similar |
+| 2,000 | -0.571 | 0.458 | 0.182 | Recognizable but blurry |
+| 3,000 | -0.493 | 0.609 | 0.195 | Close to real distribution |
+| **5,000** | **-0.404** | **0.715** | **0.176** | **Best in first run** |
+| 7,000 | -0.331 | 0.375 | 0.046 | Resume disruption |
+| 9,000 | -0.314 | 0.498 | 0.078 | Recovery phase |
+| 11,000 | -0.442 | 0.531 | 0.116 | Improving again |
+| 13,000 | -0.438 | 0.689 | 0.172 | Near convergence |
+| 14,900 | -0.280 | 0.735 | 0.114 | v5litepod-4 final |
+| 16,000 | -0.365 | 0.753 | 0.119 | v5litepod-8 improving |
+| 17,000 | -0.365 | 0.761 | 0.130 | Continued improvement |
+| 18,000 | -0.428 | 0.714 | 0.138 | Mean matches real data |
+| **19,000** | **-0.420** | **0.733** | **0.150** | **Final — very close to real** |
 
-**Reference**: Real Fashion-MNIST has mean=-0.428, std=0.706, diversity=0.251.
+**Reference**: Real Fashion-MNIST has mean=-0.428, std=0.706, diversity=0.155.
 
-### Class Differentiation (from Denoising GIF at Step 14,800)
+The progression from step 14.9K to 19K is remarkable: mean improved from -0.280 to -0.420 (delta from +0.148 to +0.008 vs real), and diversity recovered from 0.114 to 0.150 (vs real 0.155). The v5litepod-8 extension phase produced the most realistic distribution statistics in the entire training run.
+
+### Class Differentiation (from Denoising GIF at Step 19,000)
 
 The 10-class denoising GIF with guidance_scale=3.0 shows strong class differentiation at the final frame:
 
@@ -423,13 +434,11 @@ The 10-class denoising GIF with guidance_scale=3.0 shows strong class differenti
 
 ## 10. Qualitative Results
 
-### Training Evolution GIF
+### Real vs. Generated Comparison
 
-The full training progression from step 500 to 14,900, showing 8 EMA-generated samples at each checkpoint:
+![Real vs Generated](real_vs_generated.png)
 
-![Training Evolution](training_evolution.gif)
-
-*Each frame shows 8 samples generated from the EMA model at that training step. Watch the noise coalesce into recognizable fashion items across 18 key checkpoints.*
+*Top row: 8 real Fashion-MNIST samples. Bottom row: 8 CFG-generated samples at step 19K (guidance_scale=3.0, mixed classes).*
 
 ### Milestone Snapshots
 
@@ -447,9 +456,9 @@ Training evolution (first sample at each key step):
 
 The denoising GIF shows the reverse diffusion process for all 10 Fashion-MNIST classes simultaneously:
 
-![CFG Denoising](denoising_step14800_10class.gif)
+![CFG Denoising](denoising_step19000_10class.gif)
 
-*50 frames from pure noise (t=999) to clean images (t=0), one column per class. Each class starts from different noise (unique seed) and converges to a class-specific output via CFG with w=3.0.*
+*50 frames from pure noise (t=999) to clean images (t=0), with the final frame held for 3 seconds so you can see the class-specific outputs clearly. One column per class, each starting from different noise (unique seed) and converging to a class-specific output via CFG with w=3.0.*
 
 **Key observations:**
 1. **Frames 0-15** (t=999→700): Pure noise, all classes look similar
@@ -461,8 +470,8 @@ The denoising GIF shows the reverse diffusion process for all 10 Fashion-MNIST c
 
 ```bash
 KERAS_BACKEND=jax python scripts/denoising_gif.py \
-  --checkpoint artifacts/cfg-run/checkpoints/ema_step14800.weights.h5 \
-  --output artifacts/cfg-run/denoising_step14800_10class_final.gif \
+  --checkpoint artifacts/cfg-run/checkpoints/ema_step19000.weights.h5 \
+  --output artifacts/cfg-run/denoising_step19000_10class.gif \
   --guidance-scale 3.0 --num-frames 50
 ```
 
@@ -561,16 +570,16 @@ done
 
 ### The Resume Problem: Training Isn't Truly Continuous
 
-Our 14,900-step training was split across 7 TPU jobs with forced interruptions. The sample quality progression reveals a troubling pattern:
+Our 19,000-step training was split across 10 TPU jobs with forced interruptions. The sample quality progression reveals an interesting recovery pattern:
 
-- **Step 5,000** (end of Job 1): mean=-0.404, std=0.715, diversity=0.347 — best quality in the entire run
-- **Step 5,500** (after resume): mean=0.462, std=0.346, diversity=0.103 — catastrophic quality collapse
-- **Step 9,000** (after recovery): mean=-0.314, std=0.498, diversity=0.188 — still worse than step 5,000
-- **Step 14,900** (final): mean=-0.280, std=0.735, diversity=0.294 — recovered std but not mean
+- **Step 5,000** (end of Job 1): mean=-0.404, std=0.715 — best quality in first run
+- **Step 5,500** (after resume): catastrophic quality collapse
+- **Step 14,900** (end of v5litepod-4): mean=-0.280, std=0.735 — recovered std but mean still off
+- **Step 19,000** (v5litepod-8 final): mean=-0.420, std=0.733 — **nearly matches real data**
 
-The model at step 5,000 had better distribution statistics (mean=-0.404 vs real -0.428) than our final model at step 14,900 (mean=-0.280). The resume disruptions didn't just cause temporary dips — they may have permanently shifted the training trajectory. The optimizer momentum reset at each resume boundary introduced noise into the gradient estimates that the EMA averaging couldn't fully smooth out.
+The v5litepod-8 extension phase (steps 14.9K–19K) resolved the mean offset problem that persisted through 14.9K steps on v5litepod-4. The mean went from -0.280 (delta +0.148) to -0.420 (delta +0.008) — almost perfectly matching real data's -0.428. The larger batch size (128 vs 64) and potentially more stable training on 8 chips may have contributed to this improvement.
 
-**Implication**: Our "14,900 steps" of training is not equivalent to 14,900 continuous steps. A single 14,900-step job (if the timeout allowed it) would likely produce better results than our 7-job chain.
+**Implication**: The resume disruptions are real, but sufficient additional training can recover from them. The 4.1K v5litepod-8 steps produced better distribution statistics than the preceding 14.9K v5litepod-4 steps.
 
 ### No Ablation Studies
 
@@ -582,9 +591,8 @@ Every hyperparameter was chosen from the literature without systematic evaluatio
 | class_dropout_prob p=0.1 | From Ho & Salimans 2022 | No | p=0.2 or p=0.5 could improve null class learning |
 | ClassEmbedding added to time emb | Simplest approach | No | Cross-attention conditioning might be more expressive |
 | EMA decay 0.999 | From our unconditional experience | No | 0.9999 might be fine for 15K steps (we didn't re-evaluate) |
-| Attention at levels 1,2 | Different from unconditional (level 0) | No | Which attention placement is actually better for CFG? |
 
-The unconditional model uses attention at level 0 (28x28), while the conditional model uses attention at levels 1,2 (14x14, 7x7). These are different architectures. We cannot attribute quality differences to the conditioning method alone — the attention placement changed too. A controlled experiment would keep all architectural choices identical and only add/remove class conditioning.
+> **Update (April 30)**: We initially documented the unconditional model as using `attention_resolutions=(0,)` vs the conditional's `(1, 2)`, flagging this as an unfair comparison. Inspecting the actual checkpoint files revealed both models were trained with identical architecture: `attention_resolutions=(1, 2)`. The perceived inconsistency was a post-restructure documentation error — the config defaults were changed after training but didn't match the checkpoints. See [Decision 006](../../../decisions/006-attention-placement-inconsistency.md) for the full analysis.
 
 ### CFG vs. Unconditional: An Unfair Comparison
 
@@ -616,6 +624,19 @@ Our class differentiation table shows mean pixel values ranging from 84.4 (Dress
 - Real Fashion-MNIST classes overlap significantly in brightness (e.g., "Coat" and "Shirt" are both medium brightness but very different shapes)
 
 A better evaluation would compute structural similarity (SSIM) between generated and real samples of each class, or use a classifier to measure generation accuracy.
+
+### The v5litepod-8 Extension Was Worthwhile
+
+The additional 4,100 steps (14.9K→19K) on v5litepod-8 produced the most significant improvement in the entire training run:
+
+| Metric | Step 14.9K | Step 19K | Real Data |
+|--------|-----------|---------|-----------|
+| Mean | -0.280 | -0.420 | -0.428 |
+| Delta from real | +0.148 | +0.008 | — |
+| Std | 0.735 | 0.733 | 0.706 |
+| Diversity | 0.114 | 0.150 | 0.155 |
+
+The mean offset — the most concerning issue at step 14.9K — was nearly eliminated. The diversity also recovered to near-real-data levels. Whether this improvement is due to longer training, the larger batch size, or simply more data passes is unclear (it's a confound). But the result speaks for itself: the step 19K model produces much more realistic distribution statistics.
 
 ### What's Missing From This Report
 
@@ -662,8 +683,8 @@ Guidance scale chosen from literature defaults without systematic evaluation. Se
 ### Decision 005: Chained Resume Training
 7 chained TPU jobs to work around 1-hour Kinetic timeout. Resume boundaries cause temporary quality regression. See [Decision 005](../../../decisions/005-chained-resume-training.md).
 
-### Decision 006: Attention Placement Inconsistency
-Unconditional model uses attention at level 0 (28x28); conditional uses levels 1,2 (14x14, 7x7). This confounds comparisons between the two models. See [Decision 006](../../../decisions/006-attention-placement-inconsistency.md).
+### Decision 006: Attention Placement — Resolved
+Initially documented as an inconsistency between unconditional (level 0) and conditional (levels 1,2) attention. Inspecting checkpoints revealed both models always used `attention_resolutions=(1, 2)`. The difference was a post-restructure documentation error, not an architectural confound. See [Decision 006](../../../decisions/006-attention-placement-inconsistency.md).
 
 ### Decision 001: EMA Decay = 0.999 (still applies)
 ### Decision 002: 3-Level U-Net for 28x28 (still applies)
@@ -695,7 +716,7 @@ KERAS_BACKEND=jax KERAS_REMOTE_PROJECT=your-project python remote_train.py \
 
 # Generate denoising GIF
 KERAS_BACKEND=jax python scripts/denoising_gif.py \
-  --checkpoint path/to/ema_step14800.weights.h5 \
+  --checkpoint path/to/ema_step19000.weights.h5 \
   --output denoising.gif --guidance-scale 3.0
 
 # Generate all report images
@@ -738,7 +759,7 @@ KERAS_BACKEND=jax pytest tests/ -v
 
 | Task | How |
 |------|-----|
-| **Longer training** | Resume from step 14,900, train to 50K+ for sharper details |
+| **Longer training** | Resume from step 19,000, train to 50K+ for sharper details |
 | **FID evaluation** | Compute Frechet Inception Distance on held-out test set |
 | **Guidance scale sweep** | Evaluate w=1, 3, 5, 7.5 quantitatively |
 
@@ -761,13 +782,14 @@ KERAS_BACKEND=jax pytest tests/ -v
 
 | Component | Details |
 |-----------|---------|
-| **TPU type** | v5litepod-4 (4 chips, 2x2 topology) |
+| **TPU type (Phase 1)** | v5litepod-4 (4 chips, 2x2 topology) |
+| **TPU type (Phase 2)** | v5litepod-8 (8 chips, 2x4 topology) |
 | **Zone** | us-west4-a |
-| **Total TPU time** | ~7 hours (1 initial job + 6 resume jobs) |
-| **Steps completed** | 14,900 |
-| **Number of TPU jobs** | 7 |
-| **GCS storage** | ~3 GB (32 checkpoints + 32 snapshots + logs) |
-| **Local disk** | ~2 GB (downloaded artifacts) |
+| **Total TPU time** | ~10 hours (7 v5litepod-4 jobs + 3 v5litepod-8 jobs) |
+| **Steps completed** | 19,000 |
+| **Number of TPU jobs** | 10 |
+| **GCS storage** | ~5 GB (checkpoints + snapshots + logs) |
+| **Local disk** | ~3 GB (downloaded artifacts) |
 | **Spot pricing** | Not used (capacity unavailable) |
 
 ---

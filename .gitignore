@@ -35,6 +35,8 @@ AGENTS.md
 # Large training artifacts (re-downloadable from GCS)
 artifacts/cfg-run/checkpoints/
 artifacts/cfg-run/denoising*.gif
+artifacts/cfg-run/snapshots/*.npy
+artifacts/cfg-run/logs/
 artifacts/harness_baseline/
 
 # Jupyter
