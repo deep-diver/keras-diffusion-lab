@@ -68,6 +68,66 @@ KERAS_BACKEND=jax KERAS_REMOTE_PROJECT=YOUR_PROJECT python remote_train.py \
 python remote_train.py --gcs-bucket gs://YOUR_BUCKET/runs/run01 --download-only
 ```
 
+### Scaling to Larger TPU Pools
+
+The `--accelerator` flag controls TPU size. Keras 3 + JAX handles data parallelism automatically — just increase the pool size and batch size.
+
+```bash
+# v5litepod-4 (4 chips) — baseline, ~0.55 steps/s with batch=64
+kinetic pool add --accelerator v5litepod-4 --spot --project YOUR_PROJECT --zone us-west4-a
+
+# v5litepod-8 (8 chips) — 2x throughput, scale batch_size proportionally
+kinetic pool add --accelerator v5litepod-8 --spot --project YOUR_PROJECT --zone us-west4-a
+KERAS_BACKEND=jax KERAS_REMOTE_PROJECT=YOUR_PROJECT python remote_train.py \
+    --gcs-bucket gs://YOUR_BUCKET/runs/run01 \
+    --accelerator v5litepod-8 \
+    --zone us-west4-a --dataset fashion_mnist --batch-size 128 --steps 5000
+```
+
+| Accelerator | Chips | Recommended Batch Size | Expected Throughput | Relative Cost |
+|-------------|-------|----------------------|--------------------:|---------------|
+| `v5litepod-1` | 1 | 32 | ~0.14 steps/s | 0.25x |
+| `v5litepod-4` | 4 | 64 | ~0.55 steps/s | 1x (baseline) |
+| `v5litepod-8` | 8 | 128 | ~1.1 steps/s | 2x |
+
+**Key points:**
+- Scale `--batch-size` proportionally with chip count to keep per-chip memory usage constant
+- Throughput scales roughly linearly with chip count for data-parallel workloads
+- Always use Spot instances (up to 91% cheaper)
+- The same model architecture works across all pool sizes — no code changes needed
+- For pools beyond 8 chips (e.g., multi-host v5litepod-16), additional JAX mesh configuration may be needed
+
+### Using Newer TPU Generations
+
+All experiments in this repo used TPU v5e (`v5litepod`). Keras Kinetic also supports newer generations — swap the `--accelerator` flag and adjust zone if needed. No code changes required.
+
+| Generation | Accelerator | Chips | HBM/Chip | Performance | Status |
+|------------|-------------|-------|----------|-------------|--------|
+| **v5e** | `v5litepod-4` | 4 | 16 GB | Baseline | GA (what we used) |
+| **v5p** | `v5p-8` | 8 | 95 GB | ~2x compute vs v5e | GA |
+| **v6e (Trillium)** | `v6e-8` | 8 | 32 GB | 4.7x compute vs v5e, 67% more energy efficient | GA |
+| **7th Gen (Ironwood)** | — | 256+ | — | 10x vs v5p, 4x vs Trillium | GA 2025 |
+| **8th Gen (TPU 8t/8i)** | — | 9,600 | — | 121 Exaflops (superpod) | Announced 2026 |
+
+```bash
+# Trillium (v6e) — 4.7x faster per chip than v5e
+kinetic pool add --accelerator v6e-8 --spot --project YOUR_PROJECT --zone REGION
+
+# v5p — high memory (95 GB/chip), good for larger models
+kinetic pool add --accelerator v5p-8 --spot --project YOUR_PROJECT --zone REGION
+
+KERAS_BACKEND=jax KERAS_REMOTE_PROJECT=YOUR_PROJECT python remote_train.py \
+    --gcs-bucket gs://YOUR_BUCKET/runs/run01 \
+    --accelerator v6e-8 \
+    --zone REGION --dataset fashion_mnist --batch-size 128 --steps 15000
+```
+
+**Considerations:**
+- Newer generations have more HBM per chip — you can use larger models (`--base-filters 256`) or larger batch sizes
+- v5p and v6e have different zone availability than v5e; check [TPU regions and zones](https://cloud.google.com/compute/docs/regions-zones/tpu-regions-zones)
+- Spot pricing varies by generation — v6e may offer better performance-per-dollar than v5p
+- The harness code is TPU-generation-agnostic; JAX and Kinetic handle the hardware abstraction
+
 ### Generate visualizations
 
 ```bash
