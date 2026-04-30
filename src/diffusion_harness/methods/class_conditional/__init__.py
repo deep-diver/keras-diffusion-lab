@@ -10,6 +10,10 @@ between the two for class-controllable generation.
 from diffusion_harness.methods.class_conditional.training import CFGTrainer
 from diffusion_harness.methods.class_conditional.sampling import cfg_sample, CFGSampler
 from diffusion_harness.methods.class_conditional.models import build_cond_unet
+from diffusion_harness.methods.class_conditional.ddim_sampling import (
+    cfg_ddim_sample,
+    CFGDDIMSampler,
+)
 
 
 def build_model(config):

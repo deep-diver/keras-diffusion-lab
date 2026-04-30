@@ -19,3 +19,7 @@ from diffusion_harness.base.sampling import (
     save_image_grid,
     save_annotated_grid,
 )
+from diffusion_harness.base.ddim_sampling import (
+    DDIMSampler,
+    ddim_sample,
+)
