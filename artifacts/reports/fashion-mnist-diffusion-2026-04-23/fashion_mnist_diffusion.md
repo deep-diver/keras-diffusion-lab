@@ -4,8 +4,9 @@
 
 **Date**: April 23–30, 2026
 **Framework**: Keras 3 + JAX
-**Hardware**: Google Cloud TPU v5litepod-4 (steps 0–15,000) + v5litepod-8 (steps 15,000–20,000)
-**Training**: 20,000 steps (~8 hours wall-clock across chained TPU jobs on v5litepod-4 and v5litepod-8)
+**Hardware**: Google Cloud TPU v5litepod-4 (steps 0–15,000) + v5litepod-8 (steps 15,000–20,000) + v5litepod-4 spot (steps 20,000–30,000)
+**Training**: 30,000 steps (~13 hours wall-clock across chained TPU jobs)
+**Method**: Unconditional DDPM (Ho et al. 2020)
 
 ---
 
@@ -53,31 +54,29 @@ keras-diffusion-cc2/
 │   ├── __init__.py
 │   ├── core/__init__.py         # make_config() — single config builder
 │   ├── schedules/__init__.py    # Linear/cosine beta schedules, compute_schedule()
-│   ├── models/__init__.py       # build_unet() — configurable U-Net
-│   ├── training/__init__.py     # DiffusionTrainer — EMA, metrics, checkpointing
-│   ├── sampling/__init__.py     # ddpm_sample() — reverse diffusion, image grids
+│   ├── base/                    # Shared base classes
+│   │   ├── models.py            # build_unet(), ResBlock, SelfAttention
+│   │   ├── training.py          # BaseTrainer: EMA, checkpointing, train loop
+│   │   └── sampling.py          # BaseSampler: reverse diffusion, image grids
+│   ├── models/__init__.py       # Re-exports from base.models
+│   ├── training/__init__.py     # Re-exports UnconditionalTrainer as DiffusionTrainer
+│   ├── sampling/__init__.py     # Re-exports from base + unconditional
 │   ├── data/__init__.py         # load_dataset() — Fashion-MNIST/MNIST/CIFAR-10
 │   ├── monitoring/__init__.py   # EventLog — structured JSONL logging
 │   ├── utils/
 │   │   ├── __init__.py          # General utilities
 │   │   └── gcs.py               # Google Cloud Storage helpers
-│   ├── kinetic_jobs/__init__.py # (future) TPU job definitions
-│   ├── scripts/__init__.py      # (future) analysis scripts
 │   └── methods/
-│       ├── pruning/__init__.py  # (future) pruning research
+│       ├── __init__.py          # get_method() registry
+│       ├── unconditional/
+│       │   ├── training.py      # UnconditionalTrainer(BaseTrainer)
+│       │   ├── sampling.py      # unconditional_sample()
+│       │   └── config.py        # Default hyperparams
+│       ├── class_conditional/   # CFG method
+│       ├── pruning/             # (future) pruning research
 │       └── distillation/        # (future) knowledge distillation
-├── tests/                       # 41 passing tests
-│   ├── test_data.py
-│   ├── test_models.py
-│   ├── test_monitoring.py
-│   ├── test_sampling.py
-│   ├── test_schedules.py
-│   ├── test_training.py
-│   ├── test_cond_models.py
-│   ├── test_cond_training.py
-│   └── test_cond_sampling.py
+├── tests/                       # ~41 passing tests
 └── artifacts/harness_baseline/run02/   # Training outputs (on GCS)
-    └── training_evolution.gif    # Animated training progression
 ```
 
 **Design philosophy**: A clean, extensible research harness. The baseline DDPM is fully functional, with explicit extension seams for pruning, distillation, scaling studies, and other research methods.
@@ -109,10 +108,10 @@ The denoising network is a U-Net that takes a noised image $x_t$ and timestep $t
 | **Self-Attention** | Levels 1, 2 (14x14, 7x7) | Standard DDPM attention placement at lower resolutions. (Note: initially documented as level 0; corrected after checkpoint inspection — see Decision 006.) |
 | **Time conditioning** | FiLM (scale + shift) | Superior to additive injection. `h = h * (1 + scale) + shift` where scale/shift come from a learned time embedding. |
 | **Downsampling** | Strided Conv2D | More expressive than average pooling. Learned spatial downsampling. |
-
-> **Correction (April 30)**: This post originally stated the model uses `attention_resolutions=(0,)` (level 0 only). Inspecting the actual checkpoint files revealed the model was always trained with `attention_resolutions=(1, 2)` — the post-restructure config defaults were incorrectly changed. See [Decision 006](../../../decisions/006-attention-placement-inconsistency.md).
 | **Upsampling** | Conv2DTranspose | Learned upsampling matching the canonical architecture. |
 | **EMA** | decay=0.999 | Exponential moving average of weights for stable sampling. Critical for sample quality. |
+
+> **Correction (April 30)**: This post originally stated the model uses `attention_resolutions=(0,)` (level 0 only). Inspecting the actual checkpoint files revealed the model was always trained with `attention_resolutions=(1, 2)` — the post-restructure config defaults were incorrectly changed. See [Decision 006](../../../decisions/006-attention-placement-inconsistency.md).
 
 **Total parameters: 20,055,297 (~20M)**
 
@@ -211,19 +210,25 @@ result = remote_train()  # Submits to GKE, streams logs, returns result
 
 ### Chained Training for Long Runs
 
-TPU jobs have a **1-hour timeout**. At ~0.55 steps/second on v5litepod-4, each job covers ~1,980 steps. To reach 20,000 steps, we chain resume jobs:
+TPU jobs have a **1-hour timeout**. At ~0.55 steps/second on v5litepod-4, each job covers ~2,000 steps. To reach 30,000 steps, we chain resume jobs:
 
 ```
 # Phase 1: v5litepod-4 (steps 0–15K)
 Job 1: steps 0→~2,000      (timed out, checkpoint at 2000)
 Job 2: steps 2,000→~4,000   (timed out, checkpoint at 4000)
   ...
-Job 8: steps 14,000→15,000  (completed!)
+Job 8: steps 14,000→~16,200 (timed out, checkpoint at 16200)
 
 # Phase 2: v5litepod-8 (steps 15K–20K)
-Job 9: steps 15,000→16,200  (timed out, batch_size=128)
-Job 10: steps 16,200→18,000 (timed out)
-Job 11: steps 18,000→20,200 (completed target 20K + 200 bonus)
+Job 9: steps 16,200→~18,000 (timed out, batch_size=128)
+Job 10: steps 18,000→20,200 (completed)
+
+# Phase 3: v5litepod-4 spot (steps 20K–30K)
+Job 11: steps 20,000→~22,100 (timed out)
+Job 12: steps 22,000→~24,100 (timed out)
+Job 13: steps 24,000→~26,100 (completed)
+Job 14: steps 26,000→~28,100 (completed)
+Job 15: steps 28,000→30,100 (completed — target reached)
 ```
 
 Each job:
@@ -254,7 +259,7 @@ gs://bucket/harness_baseline/run02/
 
 ### Loss Progression
 
-The model trained for 20,000 steps with the following loss trajectory:
+The model trained for 30,000 steps with the following loss trajectory:
 
 | Step | Raw Loss | 100-Step Avg | Notes |
 |------|----------|--------------|-------|
@@ -272,27 +277,46 @@ The model trained for 20,000 steps with the following loss trajectory:
 | 17,000 | 0.0361 | 0.036 | — |
 | 18,000 | 0.0298 | 0.035 | — |
 | 19,000 | 0.0264 | 0.036 | — |
-| **20,000** | **0.0348** | **0.034** | **Final** |
+| **20,000** | **0.0348** | **0.035** | **v5litepod-8 → v5litepod-4 spot cutover** |
+| 21,000 | 0.0177 | 0.036 | — |
+| 22,000 | 0.0493 | 0.035 | — |
+| 23,000 | 0.0424 | 0.036 | — |
+| 24,000 | 0.0280 | 0.036 | — |
+| 25,000 | 0.0323 | 0.035 | — |
+| 26,000 | 0.0244 | 0.035 | — |
+| 27,000 | 0.0265 | 0.037 | — |
+| 28,000 | 0.0412 | 0.034 | — |
+| 29,000 | 0.0279 | 0.035 | — |
+| **30,000** | **0.0576** | **0.034** | **Final** |
 
-**Best 100-step moving average (overall): 0.0340 at step 19,912**
-**Best single-step loss (15K–20K): 0.0185 at step 19,618**
+**Best single-step loss (overall): 0.0107 at step 27,781**
+**Best 100-step moving average (overall): 0.0331 at step 28,252**
+**Best single-step loss (20K–30K): 0.0107 at step 27,781**
 
-The loss drops rapidly in the first 1,000 steps (from 1.6 to 0.05), then slowly refines over the remaining 19K steps. The extended training (15K→20K) on the larger v5litepod-8 (8 chips, batch_size=128) continued the gradual improvement. The 100-step moving average improved from 0.035 at step 15,000 to 0.034 at step 20,000 — a modest but consistent gain. The best single-step loss in the new range (0.0185) is actually lower than any loss achieved in the first 15K steps, suggesting the model is still learning.
+The loss plateaued around 0.034-0.038 from step 10,000 onward. The 20K→30K extension (Phase 3, all on v5litepod-4 spot) improved the 100-step moving average from 0.035 to 0.034 and produced the overall best single-step loss (0.0107 at step 27,781) and best 100-step average (0.0331 at step 28,252). However, the improvement is marginal — ~3% relative gain in moving average — suggesting the model is deep in the plateau.
 
-> **Critical note**: The loss plateaued around 0.034-0.038 from step 10,000 onward. The additional 5K steps improved the moving average by ~0.001 (from 0.035 to 0.034). Whether this translates to perceptual quality improvement is unclear — diffusion model loss is a poor proxy for visual quality. A proper evaluation would include FID at regular intervals. That said, the lower best-single-step losses in the 15K-20K range suggest the model has not fully converged.
+> **Critical note**: Diffusion model loss is a poor proxy for visual quality. The additional 10K steps (20K→30K) improved the moving average by only ~0.001 (from 0.035 to 0.034). Whether this translates to perceptual quality improvement is unclear without FID evaluation. That said, the lower best-single-step losses in the 20K-30K range (hitting 0.0107 vs 0.0185 in the 15K-20K range) suggest the model has not fully converged.
+
+### Loss Curve
+
+![Loss Curve](loss_curve.png)
+
+*Training loss over 30,000 steps. Left: full curve. Right: zoom on Phase 3 (steps 20K–30K). Navy = 100-step moving average, light blue = raw loss.*
 
 ### Training Speed
 
-| Phase | Hardware | Batch Size | Throughput |
-|-------|----------|-----------|------------|
-| Steps 0–15,000 | v5litepod-4 (4 chips) | 64 | ~0.55 steps/s |
-| Steps 15,000–20,000 | v5litepod-8 (8 chips) | 128 | ~0.6 steps/s |
+| Phase | Hardware | Batch Size | Throughput | Duration |
+|-------|----------|-----------|------------|----------|
+| Steps 0–15,000 | v5litepod-4 (4 chips) | 64 | ~0.55 steps/s | ~7.5 hours |
+| Steps 15,000–20,000 | v5litepod-8 (8 chips) | 128 | ~0.6 steps/s | ~3 hours |
+| Steps 20,000–30,000 | v5litepod-4 spot (4 chips) | 64 | ~0.6 steps/s | ~5 hours |
 
 | Metric | Value |
 |--------|-------|
-| Total time (20K steps) | ~8 hours across chained TPU jobs |
-| v5litepod-4 phase | ~5 hours (steps 0–15K) |
-| v5litepod-8 phase | ~3 hours (steps 15K–20K, 3 chained jobs) |
+| Total time (30K steps) | ~13 hours across 15 chained TPU jobs |
+| v5litepod-4 Phase 1 | ~7.5 hours (steps 0–15K) |
+| v5litepod-8 Phase 2 | ~3 hours (steps 15K–20K) |
+| v5litepod-4 spot Phase 3 | ~5 hours (steps 20K–30K, 5 chained jobs) |
 
 ---
 
@@ -343,7 +367,7 @@ The encoder produces 3x3 spatial dimensions, but the decoder's Conv2DTranspose p
 
 **Symptom**: Training job killed by SIGTERM after ~1 hour, with stack traces showing the process was interrupted mid-operation.
 
-**Root cause**: Keras Kinetic enforces a 1-hour timeout on GKE jobs. At ~0.55 steps/second, each job can complete ~1,980 steps before timeout.
+**Root cause**: Keras Kinetic enforces a 1-hour timeout on GKE jobs. At ~0.55 steps/second, each job can complete ~2,000 steps before timeout.
 
 **Fix**: Chain multiple resume jobs. Each job:
 1. Downloads the latest checkpoint from GCS
@@ -376,22 +400,22 @@ The encoder produces 3x3 spatial dimensions, but the decoder's Conv2DTranspose p
 
 ### Distribution Statistics
 
-The generated distribution closely matches the real data:
+The generated distribution at step 30,000:
 
-| Metric | Real Data | Generated (Step 15K) | Generated (Step 20K) |
-|--------|-----------|---------------------|---------------------|
-| **Pixel mean** | -0.338 | -0.306 | TBD |
-| **Pixel std** | 0.755 | 0.757 | TBD |
-| **Per-image diversity** | 0.277 | 0.302 | TBD |
+| Metric | Real Data | Step 15K | Step 20K | Step 25K | **Step 30K** |
+|--------|-----------|----------|----------|----------|-------------|
+| **Pixel mean** | -0.428 | -0.306 | -0.549 | -0.496 | **-0.543** |
+| **Pixel std** | 0.706 | 0.757 | 0.635 | 0.661 | **0.624** |
+| **Per-image diversity** | 0.251 | 0.302 | 0.286 | 0.287 | **0.262** |
 
-The standard deviation at 15K was nearly identical to real data (0.757 vs 0.755), indicating the model has learned the correct noise/signal balance. The 20K step distribution stats will be computed once the final samples are analyzed.
+The per-image diversity at step 30K (0.262) is very close to the real data (0.251), suggesting the model generates a realistic variety of images. However, the mean (-0.543 vs real -0.428) and std (0.624 vs real 0.706) show the model is generating images that are slightly too dark and with somewhat less contrast than real data. The distribution statistics fluctuate across checkpoints (step 20K had mean=-0.549, step 25K had -0.496, step 30K has -0.543), likely due to the small sample size (8 samples per checkpoint) rather than genuine quality oscillation.
 
 > **Why these metrics are insufficient**: Matching mean and standard deviation is *necessary but not sufficient* for good generation quality. A model that outputs random Gaussian noise with the correct mean and std would pass this test. These statistics tell us the marginal distribution is approximately correct, but say nothing about:
 > - **Mode coverage**: Does the model generate all 10 classes, or just the easiest 3-4?
 > - **Structural coherence**: Are the generated images recognizable as garments, or just noise with the right statistics?
 > - **Perceptual quality**: Do fine details (stitching, textures) look correct?
 >
-> The standard evaluation metric for generative models is **FID (Frechet Inception Distance)**, which compares the Inception-v3 feature distributions of real vs generated images in a learned feature space. We did not compute FID — this is a significant gap in our evaluation. Published unconditional DDPM baselines on Fashion-MNIST report FID scores of 5-15 at convergence (800K+ steps). Our 20K-step model likely scores far worse, but we cannot quantify this without running the evaluation.
+> The standard evaluation metric for generative models is **FID (Frechet Inception Distance)**, which compares the Inception-v3 feature distributions of real vs generated images in a learned feature space. We did not compute FID — this is a significant gap in our evaluation. Published unconditional DDPM baselines on Fashion-MNIST report FID scores of 5-15 at convergence (800K+ steps). Our 30K-step model likely scores far worse, but we cannot quantify this without running the evaluation.
 
 ### Sample Quality Progression
 
@@ -400,13 +424,14 @@ The standard deviation at 15K was nearly identical to real data (0.757 vs 0.755)
 | 200 | 0.216 | 0.613 | 0.051 | Pure noise |
 | 1,000 | -0.158 | 0.505 | 0.167 | Vague shapes emerging |
 | 2,000 | -0.231 | 0.360 | 0.167 | Recognizable but blurry |
-| 5,000 | -0.666 | 0.351 | 0.150 | Too dark (EMA bug fixed in run02) |
+| 5,000 | -0.665 | 0.351 | 0.150 | Too dark (EMA bug in run02) |
 | 7,000 | -0.477 | 0.535 | 0.251 | Clear garment shapes |
-| 10,000 | -0.024 | 0.754 | 0.266 | Sharp, diverse, realistic |
+| 10,000 | -0.024 | 0.754 | 0.265 | Sharp, diverse, realistic |
 | 12,000 | -0.373 | 0.721 | 0.264 | Good quality |
 | 15,000 | -0.306 | 0.757 | 0.302 | v5litepod-4 final |
-| 17,000 | TBD | TBD | TBD | v5litepod-8 phase |
-| 20,000 | TBD | TBD | TBD | Final quality |
+| 20,000 | -0.549 | 0.635 | 0.286 | v5litepod-8 final |
+| 25,000 | -0.496 | 0.661 | 0.287 | Phase 3 mid |
+| **30,000** | **-0.543** | **0.624** | **0.262** | **Final** |
 
 ### Fashion-MNIST Normalization Reference
 
@@ -421,15 +446,15 @@ Fashion-MNIST has a distinctive normalization profile that the model must learn:
 
 ### Training Evolution GIF
 
-The full training progression from step 200 to 20,000, showing 8 EMA-generated samples at each checkpoint:
+The full training progression from step 200 to 30,000, showing 8 EMA-generated samples at each checkpoint:
 
 ![Training Evolution](training_evolution.gif)
 
-*Each frame shows 8 samples generated from the EMA model at that training step. Watch the noise coalesce into recognizable fashion items.*
+*Each frame shows 8 samples generated from the EMA model at that training step. The final frame is held for 3 seconds. Watch the noise coalesce into recognizable fashion items.*
 
 ### Real vs. Generated Comparison
 
-Side-by-side comparison of real Fashion-MNIST images (left) and model-generated images at step 20,000 (right):
+Side-by-side comparison of real Fashion-MNIST images (top) and model-generated images at step 30,000 (bottom):
 
 ![Real vs Generated](real_vs_generated.png)
 
@@ -439,9 +464,23 @@ Samples at key training milestones:
 
 ![Milestone Samples](milestone_samples.png)
 
+*7 rows: steps 1K, 2K, 5K, 10K, 20K, 25K, 30K. Dark background for grayscale contrast.*
+
+### Evolution Strip
+
+Training evolution (first sample at each key step):
+
+![Evolution Strip](evolution_strip.png)
+
+### Final Samples at Step 30,000
+
+8 generated samples from the EMA model at step 30K:
+
+![Final Samples](final_samples_step30000.png)
+
 ### Loss Curve
 
-Training loss over 20,000 steps (navy = 100-step moving average, blue = raw, red dashed = v5litepod-8 cutover):
+Training loss over 30,000 steps (navy = 100-step moving average, blue = raw):
 
 ![Loss Curve](loss_curve.png)
 
@@ -457,24 +496,24 @@ The 3-level U-Net with FiLM conditioning:
 
 ### What We Got Wrong
 
-**1. Cargo-culting hyperparameters from the paper.** We initially used `ema_decay=0.9999` because Ho et al. (2020) used it. But their model trained for 800K steps on 256x256 images; ours trains for 20K steps on 28x28. The EMA bug cost us an entire training run. This is a common failure mode in ML engineering: copying hyperparameters without understanding *why* they work for the original setting. The lesson isn't just "match EMA to training length" — it's "always reason about hyperparameters in the context of your specific setup."
+**1. Cargo-culting hyperparameters from the paper.** We initially used `ema_decay=0.9999` because Ho et al. (2020) used it. But their model trained for 800K steps on 256x256 images; ours trains for 30K steps on 28x28. The EMA bug cost us an entire training run. This is a common failure mode in ML engineering: copying hyperparameters without understanding *why* they work for the original setting. The lesson isn't just "match EMA to training length" — it's "always reason about hyperparameters in the context of your specific setup."
 
-**2. No learning rate schedule.** We used a constant lr=2e-4 for all 20K steps. The original DDPM paper also uses constant lr, but they train for 800K steps with warmup. For shorter runs, a cosine decay or step decay might extract more learning from the final steps where the loss is barely moving. We did not test this.
+**2. No learning rate schedule.** We used a constant lr=2e-4 for all 30K steps. The original DDPM paper also uses constant lr, but they train for 800K steps with warmup. For shorter runs, a cosine decay or step decay might extract more learning from the final steps where the loss is barely moving. We did not test this.
 
 **3. Only 8 samples per snapshot.** With only 8 samples generated per checkpoint, our distribution statistics have high variance. The "per-image diversity" metric in particular is unreliable with n=8 — a single outlier sample can shift the standard deviation of means by 0.05+. We should generate at least 100 samples per checkpoint for meaningful statistics.
 
 **4. Linear schedule is suboptimal.** Nichol & Dhariwal (2021) showed that cosine schedules produce better results than linear, especially at fewer training steps. We implemented cosine schedule support but never used it for training. This was a missed opportunity — the cosine schedule's gentler noising at early timesteps could improve fine detail quality.
 
-**5. The 15K→20K extension was modest.** The additional 5K steps on v5litepod-8 (with batch_size doubled from 64 to 128) improved the 100-step moving average from 0.035 to 0.034. This is a ~3% relative improvement — statistically meaningful but unlikely to produce visibly better samples. The batch size change (64→128) is also a confound: larger batches can affect the noise in gradient estimates, potentially requiring learning rate adjustment. We did not adjust the learning rate (kept 2e-4), which may have limited the benefit of extended training.
+**5. The 20K→30K extension was modest.** The additional 10K steps on v5litepod-4 spot improved the 100-step moving average from 0.035 to 0.034. This is a ~3% relative improvement — statistically meaningful but unlikely to produce visibly better samples. The best single-step loss did improve significantly (0.0107 at step 27,781 vs 0.0185 at step 19,618), suggesting the model continues learning but the average loss barely changes.
 
 ### What We Don't Know
 
 | Unknown | Why it matters | How to resolve |
 |---------|---------------|----------------|
 | **FID score** | The standard quality metric; without it, we cannot compare to published work or our own future runs | Compute FID-10K on held-out test set |
-| **Optimal stopping point** | Loss plateaued at ~7K steps; did quality improve after that, even at 20K? | FID at regular intervals |
+| **Optimal stopping point** | Loss plateaued at ~10K steps; did quality improve after that, even at 30K? | FID at regular intervals |
 | **Class distribution of outputs** | The model is unconditional — does it generate all 10 classes equally, or over-represent easy classes like "trouser"? | Classify 1K generated samples with a pretrained classifier |
-| **Convergence status** | Is 20K steps 2.5% of convergence or 25%? | Train to 100K+ and compare FID |
+| **Convergence status** | Is 30K steps 3.75% of convergence or 37.5%? | Train to 100K+ and compare FID |
 | **Model size efficiency** | Is 20M params overkill for 28x28? Would 5M params achieve similar quality? | Sweep base_filters=32, 64, 128, 256 |
 
 ### Comparison with Published Results
@@ -484,14 +523,14 @@ The 3-level U-Net with FiLM conditioning:
 | DDPM (Ho et al. 2020) | CIFAR-10 32x32 | 800K | 3.17 | Canonical baseline |
 | Improved DDPM (Nichol 2021) | CIFAR-10 32x32 | 800K | 2.92 | Cosine schedule + importance sampling |
 | DDPM on Fashion-MNIST (community) | Fashion-MNIST 28x28 | 100K+ | ~5-15 | Various implementations |
-| **Ours** | **Fashion-MNIST 28x28** | **20K** | **Not computed** | ~20M params, linear schedule, v5litepod-4 + v5litepod-8 |
+| **Ours** | **Fashion-MNIST 28x28** | **30K** | **Not computed** | ~20M params, linear schedule, 15 chained TPU jobs |
 
-We trained for roughly 2.5% of the typical convergence budget (20K vs 800K steps). The generated images are recognizable but lack fine details. The additional 5K steps (15K→20K) produced only marginal loss improvement (~3%), suggesting we're deep in the plateau. Without FID, we cannot determine if visual quality meaningfully improved. The interesting question remains whether our architecture and hyperparameters are on the right trajectory — and whether 100K+ steps would close the gap with published results.
+We trained for roughly 3.75% of the typical convergence budget (30K vs 800K steps). The generated images are recognizable but lack fine details. Without FID, we cannot determine if visual quality meaningfully improved from 20K to 30K. The interesting question remains whether our architecture and hyperparameters are on the right trajectory — and whether 100K+ steps would close the gap with published results.
 
 ### The 28x28 Problem
 
 Fashion-MNIST's 28x28 resolution is both a blessing and a curse:
-- **Blessing**: Fast iteration (0.55 steps/s on TPU), small model (20M params), quick experimentation cycle
+- **Blessing**: Fast iteration (0.6 steps/s on TPU), small model (20M params), quick experimentation cycle
 - **Curse**: Most published diffusion model results are for 32x32 (CIFAR-10) or larger. The 28x28 size causes architectural friction (can't use 4 levels, odd spatial dimensions). It also makes FID less meaningful — Inception-v3 was designed for 299x299 ImageNet images, not 28x28 grayscale thumbnails. FID on such small images correlates poorly with human judgment.
 
 A more honest evaluation would use **sFID** (style-based FID) or **Inception Score** as supplementary metrics, but even these have known failure modes on low-resolution datasets.
@@ -531,19 +570,20 @@ KERAS_BACKEND=jax python remote_train.py \
 ### TPU Training via Kinetic
 
 ```bash
-# One-time: set up TPU pool
-kinetic pool add --accelerator v5litepod-4
+# One-time: set up TPU pool (spot for 91% savings)
+kinetic pool add --accelerator v5litepod-4 --spot \
+    --project YOUR_PROJECT --zone us-west4-a
 
 # Submit training job
-KERAS_BACKEND=jax KERAS_REMOTE_PROJECT=your-project python remote_train.py \
+KERAS_BACKEND=jax python remote_train.py \
   --gcs-bucket gs://your-bucket/diffusion/run01 \
   --zone us-west4-a \
   --dataset fashion_mnist --steps 2000 \
   --num-levels 3 --batch-size 64 \
   --checkpoint-every 500 --sample-every 250
 
-# Resume from checkpoint
-KERAS_BACKEND=jax KERAS_REMOTE_PROJECT=your-project python remote_train.py \
+# Resume from checkpoint (chain for long runs)
+KERAS_BACKEND=jax python remote_train.py \
   --gcs-bucket gs://your-bucket/diffusion/run01 \
   --zone us-west4-a \
   --dataset fashion_mnist --steps 2000 \
@@ -558,17 +598,19 @@ python remote_train.py --gcs-bucket gs://your-bucket/diffusion/run01 --download-
 
 ```bash
 KERAS_BACKEND=jax pytest tests/ -v
-# 31 tests covering data, models, monitoring, sampling, schedules, training
+# ~41 tests covering data, models, monitoring, sampling, schedules,
+# training + conditional models, training, and sampling
 ```
 
 ### Key Implementation Files
 
 | File | What to understand |
 |------|-------------------|
-| `src/diffusion_harness/models/__init__.py` | U-Net architecture, FiLM conditioning, self-attention |
-| `src/diffusion_harness/training/__init__.py` | DiffusionTrainer — train loop, EMA, checkpointing |
+| `src/diffusion_harness/base/models.py` | U-Net architecture, FiLM conditioning, self-attention |
+| `src/diffusion_harness/base/training.py` | BaseTrainer — train loop, EMA, checkpointing |
+| `src/diffusion_harness/methods/unconditional/training.py` | UnconditionalTrainer — epsilon-MSE loss |
 | `src/diffusion_harness/schedules/__init__.py` | Noise schedules and derived quantities |
-| `src/diffusion_harness/sampling/__init__.py` | DDPM reverse sampling process |
+| `src/diffusion_harness/base/sampling.py` | DDPM reverse sampling process |
 | `src/diffusion_harness/core/__init__.py` | Configuration builder |
 
 ### Understanding the Sampling Process
@@ -594,7 +636,7 @@ This codebase is designed as a **research harness** with explicit extension seam
 
 | Direction | How to implement |
 |-----------|-----------------|
-| **Longer training** | Resume from step 20K checkpoint, train to 50K–100K+ steps |
+| **Longer training** | Resume from step 30K checkpoint, train to 100K+ steps |
 | **CIFAR-10** | Change `--dataset cifar10 --num-levels 4` (32x32 supports 4 levels cleanly) |
 | **Larger model** | Increase `--base-filters` to 192 or 256 |
 | **Higher resolution** | Extend to 64x64 or 128x128 (requires architecture changes) |
@@ -642,11 +684,16 @@ This codebase is designed as a **research harness** with explicit extension seam
 
 | Component | Details |
 |-----------|---------|
-| **TPU type** | v5litepod-4 (4 chips, 2x2 topology) |
-| **Total TPU time** | ~5 hours (8 chained jobs x ~40 min each) |
-| **Spot pricing** | Not used (should be for future runs — up to 91% savings) |
-| **GCS storage** | ~5 GB (checkpoints, snapshots, events) |
-| **Local disk** | ~3 GB (downloaded artifacts) |
+| **TPU type (Phase 1)** | v5litepod-4 (4 chips, 2x2 topology) |
+| **TPU type (Phase 2)** | v5litepod-8 (8 chips, 2x4 topology) |
+| **TPU type (Phase 3)** | v5litepod-4 spot (4 chips) |
+| **Zone** | us-west4-a |
+| **Total TPU time** | ~13 hours (15 chained jobs) |
+| **Steps completed** | 30,000 |
+| **Number of TPU jobs** | 15 |
+| **Phase 3 cost** | Spot instances — up to 91% savings vs on-demand |
+| **GCS storage** | ~10 GB (checkpoints, snapshots, events) |
+| **Local disk** | ~5 GB (downloaded artifacts) |
 
 ---
 

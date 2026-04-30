@@ -39,5 +39,8 @@ artifacts/cfg-run/snapshots/*.npy
 artifacts/cfg-run/logs/
 artifacts/harness_baseline/
 
+# Medium blog post (not for repo)
+medium_blog_post.md
+
 # Jupyter
 .ipynb_checkpoints/
