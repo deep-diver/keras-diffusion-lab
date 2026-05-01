@@ -3,11 +3,24 @@
 Loads conditional 30K checkpoint, generates samples for w in [1, 3, 5, 7.5],
 computes FID and classification accuracy for each, and produces a report.
 
+Supports both DDPM (1000 steps) and DDIM (configurable steps) sampling.
+DDIM is the default for practical speed.
+
 Usage:
+    # DDIM-50 (fast, ~20x speedup)
     KERAS_BACKEND=jax python scripts/guidance_sweep.py \
         --checkpoint artifacts/cfg-run/checkpoints/ema_step30000.weights.h5 \
+        --sampler ddim --ddim-steps 50 \
         --output-dir artifacts/guidance_sweep \
         --samples-per-class 100 \
+        --guidance-scales 1.0 3.0 5.0 7.5
+
+    # DDPM-1000 (slow but faithful to training)
+    KERAS_BACKEND=jax python scripts/guidance_sweep.py \
+        --checkpoint artifacts/cfg-run/checkpoints/ema_step30000.weights.h5 \
+        --sampler ddpm \
+        --output-dir artifacts/guidance_sweep \
+        --samples-per-class 10 \
         --guidance-scales 1.0 3.0 5.0 7.5
 """
 
@@ -35,6 +48,11 @@ def main():
                         help="Directory with classifier weights and real stats")
     parser.add_argument("--batch-size", type=int, default=50,
                         help="Generation batch size per class")
+    parser.add_argument("--sampler", default="ddim",
+                        choices=["ddpm", "ddim"],
+                        help="Sampling method: ddpm (1000 steps) or ddim (fast)")
+    parser.add_argument("--ddim-steps", type=int, default=50,
+                        help="Number of DDIM steps (only used with --sampler ddim)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -73,6 +91,7 @@ def main():
     # Build conditional model
     from diffusion_harness.methods.class_conditional.models import build_cond_unet
     from diffusion_harness.methods.class_conditional.sampling import CFGSampler
+    from diffusion_harness.methods.class_conditional.ddim_sampling import CFGDDIMSampler
     from diffusion_harness.schedules import linear_beta_schedule, compute_schedule
 
     print("Building conditional model...")
@@ -87,14 +106,25 @@ def main():
     betas = linear_beta_schedule(1000)
     schedule = compute_schedule(betas)
 
+    sampler_type = args.sampler.upper()
+    if args.sampler == "ddim":
+        print(f"  Using DDIM-{args.ddim_steps} sampler")
+    else:
+        print(f"  Using DDPM-1000 sampler")
+
     # Run sweep
     results = []
     all_samples = {}
 
     for w in args.guidance_scales:
-        print(f"\n=== Guidance scale w={w} ===")
-        sampler = CFGSampler(model, schedule, num_timesteps=1000,
-                             guidance_scale=w, num_classes=num_classes)
+        print(f"\n=== Guidance scale w={w} ({sampler_type}) ===")
+        if args.sampler == "ddim":
+            sampler = CFGDDIMSampler(model, schedule, num_timesteps=1000,
+                                     guidance_scale=w, num_classes=num_classes,
+                                     eta=0.0, subsequence_size=args.ddim_steps)
+        else:
+            sampler = CFGSampler(model, schedule, num_timesteps=1000,
+                                 guidance_scale=w, num_classes=num_classes)
 
         # Generate samples for all classes
         all_gen = []
@@ -141,6 +171,7 @@ def main():
             'accuracy': accuracy,
             'per_class_accuracy': per_class,
             'n_samples': len(all_gen),
+            'sampler': sampler_type,
         }
         results.append(result)
 
@@ -183,6 +214,8 @@ def main():
         guidance_scales=np.array([r['guidance_scale'] for r in results]),
         fids=np.array([r['fid'] for r in results]),
         accuracies=np.array([r['accuracy'] for r in results]),
+        sampler=sampler_type,
+        ddim_steps=args.ddim_steps if args.sampler == "ddim" else 0,
     )
 
     # Generate plot
