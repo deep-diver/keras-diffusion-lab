@@ -1,8 +1,8 @@
 # Building a Diffusion Model Research Harness from Scratch
 
-> How we built an extensible diffusion model framework on Keras 3 + JAX, trained two models on Google Cloud TPUs, and learned what the tutorials don't tell you.
+> How we built an extensible diffusion model framework on Keras 3 + JAX, trained two models on Google Cloud TPUs, and discovered that Classifier-Free Guidance doesn't work at 30K steps — along with everything else the tutorials don't tell you.
 
-**April 2026** | [GitHub](https://github.com/deep-diver/keras-diffusion-lab)
+**May 2026** | [GitHub](https://github.com/deep-diver/keras-diffusion-lab)
 
 ---
 
@@ -12,7 +12,7 @@ Diffusion models generate images by learning to reverse a gradual noising proces
 
 But when you actually sit down to build one from scratch — not using Hugging Face diffusers, not cloning a reference implementation — the gap between "understanding the paper" and "having a working model" turns out to be wide. Really wide.
 
-This is the story of closing that gap: building a complete diffusion model research harness on Keras 3 + JAX, training it on Fashion-MNIST using Google Cloud TPUs, then extending it to support class-conditional generation with Classifier-Free Guidance. Along the way, we hit every pothole the tutorials skip over.
+This is the story of closing that gap: building a complete diffusion model research harness on Keras 3 + JAX, training it on Fashion-MNIST using Google Cloud TPUs, extending it to support class-conditional generation with Classifier-Free Guidance, then evaluating everything rigorously and discovering that the most important feature (CFG class control) doesn't work as expected.
 
 ---
 
@@ -32,25 +32,27 @@ The goal: a clean, extensible codebase where adding a new research method means 
 
 ## What We Built
 
-Two trained models on Fashion-MNIST (28x28 grayscale, 10 classes):
+Two trained models on Fashion-MNIST (28x28 grayscale, 10 classes), plus three research experiments:
 
 | Model | Steps | Params | What It Does |
 |-------|-------|--------|-------------|
-| **Unconditional DDPM** | 15,000 | ~20M | Generates random fashion items — press "generate," get a surprise |
-| **Class-Conditional CFG** | 14,900 | ~21M | Generates specific classes — ask for a sneaker, get a sneaker |
+| **Unconditional DDPM** | 30,000 | ~20M | Generates random fashion items — press "generate," get a surprise |
+| **Class-Conditional CFG** | 30,000 | ~21M | Generates specific classes — ask for a sneaker, get... well, that's the story |
 
-Both trained on Google Cloud TPU v5litepod-4 (4 TPU chips) using Keras Kinetic for remote execution. Both produce recognizable fashion items. The conditional model demonstrates class-level control through Classifier-Free Guidance.
+Both trained on Google Cloud TPU v5litepod-4 (4 TPU chips) using Keras Kinetic for remote execution, across 15 chained TPU jobs (~13 hours total).
 
 ```
 Unconditional:  noise → [U-Net x1000 steps] → random fashion item
-Conditional:    noise + "sneaker" → [Guided U-Net x1000 steps] → 👟 sneaker
+Conditional:    noise + "sneaker" → [Guided U-Net x1000 steps] → should be 👟
 ```
 
 The full harness includes:
 - A method registry for plugging in new research approaches
 - A template-method training loop with shared EMA, checkpointing, and logging
-- GCS-based artifact persistence for TPU job survival
-- 41 tests, 6 architecture decision records, and detailed experiment cards
+- DDIM deterministic sampling (20x faster than DDPM, no retraining)
+- FID evaluation using a domain-specific classifier
+- Guidance scale sweep infrastructure
+- 58 tests, 6 architecture decision records, and detailed experiment cards
 
 ---
 
@@ -74,7 +76,7 @@ Output: predicted noise (28x28x1)
 
 Each `ResBlock` receives a timestep embedding via FiLM (Feature-wise Linear Modulation) — essentially "here's how noisy this image is, adjust your processing accordingly." Self-attention is applied at the lowest spatial resolution (7x7) to capture global structure.
 
-For class-conditional generation, we add a `ClassEmbedding` layer that produces a vector for each class label. This gets added to the time embedding, so the model receives combined "what timestep is this" + "what class should this be" information through the same FiLM pathway. No architectural gymnastics — just add the embeddings and go.
+For class-conditional generation, we add a `ClassEmbedding` layer that produces a vector for each class label. This gets added to the time embedding, so the model receives combined "what timestep is this" + "what class should this be" information through the same FiLM pathway.
 
 ```
 Time embedding:     [batch, 512]
@@ -106,24 +108,20 @@ Fix: changed EMA decay to 0.999 (1,000-step window). Samples immediately improve
 
 ### Phase 2: Chaining TPU Jobs
 
-Keras Kinetic has a 1-hour timeout per job. At ~0.55 steps/second with batch size 64, each job covers roughly 2,000 steps. To reach 15,000 steps, we chained 8 jobs — each one resuming from the latest checkpoint:
+Keras Kinetic has a 1-hour timeout per job. At ~0.55 steps/second with batch size 64, each job covers roughly 2,000 steps. To reach 30,000 steps, we chained 15 jobs across three hardware phases:
 
 ```
-Job 1: steps 0→2,000      (timed out)
-Job 2: steps 2,000→4,000   (timed out)
-  ...
-Job 8: steps 14,000→15,000 (completed!)
+# Phase 1: v5litepod-4 (steps 0–15K), ~7.5 hours
+Job 1-8: steps 0→~16,200
+
+# Phase 2: v5litepod-8 (steps 15K–20K), ~3 hours
+Job 9-10: steps 16,200→20,200
+
+# Phase 3: v5litepod-4 spot (steps 20K–30K), ~5 hours
+Job 11-15: steps 20,000→30,100
 ```
 
-This worked, but introduced a subtle problem: quality regressions at job boundaries. When resuming, the Adam optimizer's momentum buffers are restored, but the learning rate schedule and gradient statistics need a few hundred steps to re-stabilize. Loss spikes at resume points are visible in the training curve:
-
-```
-Step 4,900: loss = 0.031   ← end of Job 2
-Step 5,100: loss = 0.144   ← start of Job 3 (resume bump)
-Step 5,500: loss = 0.035   ← recovered
-```
-
-The fix isn't elegant — just be aware of it and don't evaluate quality at resume boundaries. [Decision 005](decisions/005-chained-resume-training.md) documents this in full.
+Each job downloads the latest checkpoint from GCS, restores all state, and continues. Quality regressions at job boundaries are visible in the loss curve but recover within ~500 steps. [Decision 005](decisions/005-chained-resume-training.md) documents this in full.
 
 ### Phase 3: Adding Class Control
 
@@ -133,72 +131,128 @@ Once unconditional generation worked, the next question was obvious: can we cont
 guided_prediction = (1 + w) * conditioned - w * unconditioned
 ```
 
-Where `w` is the guidance scale. At w=3.0 (our default), this pushes the model toward the specified class while maintaining sample diversity.
+Implementing CFG required restructuring the entire codebase from a single-experiment project into a multi-method harness. The restructure touched 7 existing modules while keeping all 31 tests passing. But it paid off: the class-conditional implementation reused 90% of the unconditional code. `CFGTrainer` extends `BaseTrainer` and only overrides `train_step()`.
 
-Implementing CFG required restructuring the entire codebase from a single-experiment project into a multi-method harness. The original `models/`, `training/`, and `sampling/` modules became thin re-exports, while new `methods/unconditional/` and `methods/class_conditional/` packages held the actual implementations. A method registry (`get_method("class_conditional")`) dispatches to the right modules.
+### Phase 4: Evaluation — What We Wish We'd Done First
 
-The restructure was the hardest engineering task in the project — touching 7 existing modules while keeping all 31 tests passing. But it paid off: the class-conditional implementation reused 90% of the unconditional code. `CFGTrainer` extends `BaseTrainer` and only overrides `train_step()` — the training loop, EMA, checkpointing, and logging are all inherited.
+After training both models to 30K steps, we finally built the evaluation pipeline we should have had from the start:
+
+**DDIM Sampling** — Standard DDPM needs 1000 forward passes per image (~52s each). DDIM reduces this to 50 steps (~2.6s) — a 20x speedup — by visiting only a subsequence of timesteps with a deterministic update rule. No retraining required. This made all subsequent evaluation feasible.
+
+**FID Evaluation** — We trained a Fashion-MNIST classifier (91.52% accuracy) and used its penultimate layer as a feature extractor for FID. Domain-specific features instead of InceptionV3, which would require 10x upscaling from 28x28 to 299x299.
+
+**Guidance Scale Sweep** — We swept w ∈ {1.0, 3.0, 5.0, 7.5} with 100 samples per scale, measuring both FID and classification accuracy.
+
+---
+
+## The Uncomfortable Finding: CFG Doesn't Work
+
+Here's what we expected: higher guidance scale → stronger class signal → better accuracy. This is how CFG works in published models like Stable Diffusion.
+
+Here's what we found:
+
+| Guidance Scale (w) | FID | Accuracy | What's happening |
+|---------------------|-----|----------|-------------------|
+| 1.0 | ~93 | **29%** | Weak class signal, some correct |
+| 3.0 (our default) | **~70** | **10%** | Best FID, but chance-level accuracy |
+| 5.0 | ~75 | **1%** | Accuracy collapses |
+| 7.5 | ~81 | **0%** | No sample classified correctly |
+
+The CFG paradox: **w=3.0 produces the best-looking images but completely ignores the class label.** Classification accuracy at w=3.0 is exactly 10% — random chance for 10 classes.
+
+### Why It Fails
+
+CFG amplifies the difference between the conditional and unconditional predictions:
+
+```
+ε_guided = ε_cond + w × (ε_cond − ε_uncond)
+                       ↑
+                  The "class signal"
+```
+
+If the model hasn't learned to differentiate by class (ε_cond ≈ ε_uncond), the amplified signal is just noise. The model generates reasonable unconditional images → decent FID. But there's no class information → chance accuracy.
+
+At only 30K training steps (3.75% of the typical 800K convergence budget), the model simply hasn't trained long enough for the conditional/unconditional gap to develop. Published CFG results use 200K-800K steps.
+
+### What This Means
+
+This is the most important finding about our conditional model. It doesn't mean CFG is broken — it means our model is undertrained. The priority for future work is clear: train longer and re-evaluate.
+
+---
+
+## The FID Lesson
+
+Building the FID pipeline taught us something equally important: **128-dimensional features are useless at small sample sizes**.
+
+FID requires estimating a 128×128 covariance matrix from generated samples. The rank of this estimate is min(n, d):
+
+| Samples | Covariance Rank | FID Reliability |
+|---------|----------------|-----------------|
+| 4 (DDIM comparison) | 3% | Meaningless |
+| 8 (initial evaluation) | 6% | Extremely noisy |
+| 100 (guidance sweep) | 78% | Marginal |
+| 500+ | 100% | Reliable |
+
+Our initial FID evaluation (8 samples) produced numbers like "87.14" and "131.41" — false precision from a rank-deficient matrix. The matrix square root computation issued singularity warnings. We've since learned to treat FID at these sample sizes as a directional indicator only.
+
+The fix for future work: reduce the feature dimension to 32 (reliable at n=100) or generate 500+ samples per evaluation.
 
 ---
 
 ## Results
 
-### Unconditional DDPM (15,000 steps)
+### Unconditional DDPM (30,000 steps)
 
-The model generates recognizable fashion items: t-shirts, trousers, bags, sneakers, dresses. Some samples are crisp; others are blurry or show class blending (a shoe that's halfway between a sneaker and a sandal).
-
-| Metric | Value |
-|--------|-------|
-| Final loss (100-step avg) | 0.038 |
-| Best single-step loss | 0.0218 (step 12,000) |
-| Training time | ~5 hours across 8 TPU jobs |
-| Throughput | ~0.55 steps/sec, ~35 images/sec |
-
-### Class-Conditional CFG (14,900 steps)
-
-The model generates class-specific items. Asking for class 7 ("sneaker") produces sneakers; class 8 ("bag") produces bags. Class boundaries are reasonably sharp, though some cross-class bleeding remains.
+The model generates recognizable fashion items: t-shirts, trousers, bags, sneakers, dresses. Some samples are crisp; others show class blending.
 
 | Metric | Value |
 |--------|-------|
-| Final loss (100-step avg) | 0.038 |
+| Final loss (100-step avg) | 0.034 |
+| Best single-step loss | 0.0107 (step 27,781) |
+| FID (8 samples, unreliable) | ~87 |
+| Training time | ~13 hours across 15 TPU jobs |
+
+### Class-Conditional CFG (30,000 steps)
+
+The model generates visually appealing fashion items, but class control is non-functional at all tested guidance scales.
+
+| Metric | Value |
+|--------|-------|
+| Final loss (100-step avg) | 0.034 |
 | Best single-step loss | 0.0135 (step 14,503) |
-| Training time | ~7 hours across 7 TPU jobs |
-| Guidance scale | 3.0 (not ablated) |
+| FID at w=3.0 (100 samples) | ~70 |
+| Classification accuracy at w=3.0 | 10% (chance) |
+| Training time | ~13 hours across 15 TPU jobs |
+
+### DDIM Sampling
+
+| Metric | DDPM-1000 | DDIM-50 |
+|--------|-----------|---------|
+| Time per sample | 52.5s | 2.6s |
+| Speedup | 1x | **20x** |
+| FID (4 samples, unreliable) | ~274 | ~262 |
 
 ---
 
 ## What We'd Do Differently
 
-Honest assessment of the limitations — things that worked, things that didn't, and things we should have done but didn't.
+Honest assessment — things that worked, things that didn't, and things we should have done but didn't.
 
-### No FID Scores
+### Should Have Built Evaluation First
 
-The single biggest gap. We evaluated sample quality visually and with pixel distribution statistics (mean, std, histogram comparison). Neither is a reliable proxy for perceptual quality. FID (Frechet Inception Distance) is the standard metric, and we should have computed it at regular intervals throughout training. Without FID:
-- We can't objectively compare unconditional vs. conditional quality
-- We can't determine the optimal stopping point
-- We can't benchmark against published results
+We spent months training models without FID. By the time we added it, we'd already committed to 30K steps with a model whose class conditioning doesn't work. If we'd had FID + accuracy evaluation from step 1K, we'd have caught the CFG failure early and either trained longer or adjusted the approach.
 
-### No Ablation Studies
+### 128-dim Features Were Too Large
 
-We used guidance scale w=3.0 because it's moderate and "looked good." We didn't sweep w=1, 2, 3, 5, 7.5 to find the optimal value. Similarly, we used class dropout probability 0.1 from the CFG paper without testing 0.05 or 0.2. These are free parameters that directly affect quality, and we cargo-culted them from the literature.
+The Dense(128) feature layer was a poor match for our sample sizes. A Dense(32) layer would have made FID reliable at n=100 (our practical limit for sweeps). The extra 96 dimensions don't help if you can't estimate their covariance.
 
-### Unfair Comparison
+### Attention Placement Confound
 
-The unconditional and conditional models have different attention placements (unconditional: level 0; conditional: levels 1, 2). This means any quality difference between the two could be due to attention configuration rather than the conditional training method. [Decision 006](decisions/006-attention-placement-inconsistency.md) flags this as a known confound.
+The unconditional and conditional models have different attention placements (level 0 vs levels 1,2). This means any quality difference could be due to attention configuration rather than the conditional training method. [Decision 006](decisions/006-attention-placement-inconsistency.md) flags this.
 
-### No Learning Rate Schedule
+### 30K Steps Is Not Enough for CFG
 
-We used a constant learning rate of 2e-4 throughout training. A cosine annealing or warmup schedule might have improved convergence, especially given the resume-boundary spikes in chained training.
-
-### Missing Evaluation Suite
-
-A proper evaluation pipeline would include:
-- FID at every 1,000 steps
-- Inception Score
-- Classification accuracy of generated samples (does a "sneaker" sample actually look like a sneaker to a classifier?)
-- Diversity metrics within each class
-
-We have none of these. The evaluation is "look at the samples and check if they seem right."
+Published CFG results use 200K-800K steps. Our 30K steps is 3.75% of the typical budget. The class conditioning failure is almost certainly due to insufficient training, not an architectural problem.
 
 ---
 
@@ -208,131 +262,46 @@ The final structure reflects the journey from single experiment to research harn
 
 ```
 src/diffusion_harness/
-  base/                    # Shared: build_unet, BaseTrainer, BaseSampler
+  base/                    # Shared: build_unet, BaseTrainer, BaseSampler, DDIMSampler
   methods/
     unconditional/         # DDPM epsilon-prediction
-    class_conditional/     # CFG with guided sampling
+    class_conditional/     # CFG with guided sampling (DDPM + DDIM)
     pruning/               # (TODO)
     distillation/          # (TODO)
   core/                    # make_config() builder
   schedules/               # Linear/cosine noise schedules
   data/                    # Dataset loading with optional labels
+  metrics/                 # Classifier, FID, classification accuracy
   monitoring/              # JSONL structured logging
   utils/                   # GCS helpers for TPU persistence
 
+scripts/                   # Evaluation and visualization scripts
 decisions/                 # 6 ADR-style decision records
 experiments/               # 2 experiment cards with configs + results
-tests/                     # 41 tests (31 original + 10 CFG)
+tests/                     # 58 tests
 ```
-
-Adding a new method means creating `methods/<name>/` with four functions — `build_model()`, `build_trainer()`, `build_sampler()`, and `config.py` — then registering it. The base classes handle the rest.
 
 The pattern we landed on:
 - **Template method** for the training loop (`BaseTrainer.train()` calls `train_step()` which subclasses implement)
 - **Inheritance** for method-specific behavior (`CFGTrainer` extends `BaseTrainer`)
 - **Registry** for dispatch (`get_method("class_conditional")`)
-
-This is deliberately simple — no plugin framework, no dependency injection, no configuration DSL. Just classes and a dictionary lookup. For a research harness with a handful of methods, this is the right level of abstraction.
-
----
-
-## TPU Operations: The Undocumented Parts
-
-Running on Google Cloud TPUs via Keras Kinetic taught us things that aren't in any tutorial:
-
-**Always use Spot instances.** Up to 91% cheaper. Spot preemption is rare for short jobs (< 1 hour), and our checkpoint-every-1,000-steps strategy means we lose at most a few minutes of training on preemption.
-
-**Keras Kinetic has a context packaging bug** (as of v0.0.1). The `context.zip` it uploads to the TPU worker captures `kinetic/core/` instead of your project source. The workaround is to use the `volumes` parameter to explicitly ship your code:
-
-```python
-src_data = kinetic.Data("./src/")
-
-@kinetic.run(accelerator="v5litepod-4", volumes={"/tmp/src": src_data})
-def remote_train():
-    import sys
-    sys.path.insert(0, "/tmp/src")
-    # now your imports work
-```
-
-**GCS is your only persistence.** Everything on the TPU worker dies with the job. We checkpoint every 1,000 steps: model weights, EMA weights, optimizer state, and a training state JSON. The checkpoint quartet is the minimum viable persistence.
-
-### What If I Want a Larger TPU Pool?
-
-All our experiments used `v5litepod-4` (4 TPU chips). But the harness supports larger pools out of the box — just change the `--accelerator` flag and scale the batch size.
-
-Keras 3 + JAX handles data parallelism automatically. When JAX sees multiple TPU chips, it replicates the model across devices and splits each batch. No code changes needed — no mesh configuration, no sharding annotations for single-host setups.
-
-| Accelerator | Chips | Batch Size | Throughput | Use Case |
-|-------------|-------|-----------|------------|----------|
-| `v5litepod-1` | 1 | 32 | ~0.14 steps/s | Debugging, local testing |
-| `v5litepod-4` | 4 | 64 | ~0.55 steps/s | Research iteration (what we used) |
-| `v5litepod-8` | 8 | 128 | ~1.1 steps/s | Faster training, larger models |
-
-```bash
-# 8-chip pool — 2x throughput, double the batch size
-kinetic pool add --accelerator v5litepod-8 --spot --project YOUR_PROJECT --zone us-west4-a
-
-KERAS_BACKEND=jax KERAS_REMOTE_PROJECT=YOUR_PROJECT python remote_train.py \
-    --gcs-bucket gs://YOUR_BUCKET/runs/run01 \
-    --accelerator v5litepod-8 \
-    --zone us-west4-a --dataset fashion_mnist --batch-size 128 --steps 15000
-```
-
-The throughput scales roughly linearly because each chip processes its sub-batch independently — pure data parallelism. The same ~20M parameter model that fits on 4 chips also fits on 8, but each step processes twice as many images.
-
-**When you need more than 8 chips**, you enter multi-host territory. TPU v5e supports up to 16 chips (4x4 topology) in a single slice, but this requires multiple VMs and explicit JAX mesh configuration. That's beyond what Kinetic handles automatically today, and would be the next infrastructure project if scaling studies demand it.
-
-**When you need a larger model**, not just faster training — increase `--base-filters` (e.g., 128 to 256) and possibly `--num-levels` (3 to 4 for images larger than 28x28). The larger model needs more memory per chip, which may require the 8-chip pool even at the same batch size.
-
-### What About Newer TPU Generations?
-
-All our experiments used TPU v5e (`v5litepod-4`). But Google Cloud offers significantly faster chips now, and the harness works with them out of the box — just change the `--accelerator` flag.
-
-The current Google Cloud TPU landscape:
-
-| Generation | Accelerator | Key Specs | Status |
-|------------|-------------|-----------|--------|
-| **v5e** | `v5litepod-4` | 16 GB HBM/chip | GA (what we used) |
-| **v5p** | `v5p-8` | 95 GB HBM/chip, ~2x compute | GA |
-| **v6e (Trillium)** | `v6e-8` | 32 GB HBM/chip, 4.7x compute vs v5e | GA |
-| **7th Gen (Ironwood)** | — | 10x vs v5p | GA 2025 |
-| **8th Gen (TPU 8t/8i)** | — | 121 Exaflops superpod | Announced 2026 |
-
-For a 20M-parameter diffusion model on Fashion-MNIST, the v5litepod-4 is already more than sufficient — our bottleneck was the 1-hour job timeout, not compute. But for scaling studies (larger models, higher-resolution datasets like CIFAR-10 or ImageNet), newer generations become compelling:
-
-- **v5p** gives you 95 GB HBM per chip — enough to train models in the 100M+ parameter range without worrying about memory
-- **Trillium (v6e)** delivers 4.7x the compute per chip at 67% better energy efficiency, making it the best performance-per-dollar option for training
-- **Ironwood and beyond** are aimed at frontier-scale training (think Gemini-class models) and are overkill for a research harness — but the code would work on them unchanged
-
-The key insight: because Keras 3 + JAX handles device abstraction, and Kinetic handles job submission, the harness code is completely TPU-generation-agnostic. You don't rewrite anything — you just provision a different pool.
-
-```bash
-# Upgrade from v5e to Trillium — no code changes
-kinetic pool add --accelerator v6e-8 --spot --project YOUR_PROJECT --zone REGION
-
-KERAS_BACKEND=jax KERAS_REMOTE_PROJECT=YOUR_PROJECT python remote_train.py \
-    --gcs-bucket gs://YOUR_BUCKET/runs/run01 \
-    --accelerator v6e-8 \
-    --zone REGION --dataset cifar10 --base-filters 256 --steps 50000
-```
-
-These lessons are documented in [TPU field notes](artifacts/reports/keras_kinetic_tpu_field_notes.md) and [engineering tips](artifacts/reports/engineering_tips.md).
+- **Hook pattern** for sampling (`DDIMSampler.model_predict()` — override for method-specific prediction)
 
 ---
 
 ## What's Next
 
-The harness is designed to support the research directions that matter most for diffusion models in 2026:
+The three research experiments pointed to clear next steps:
 
-**Model pruning** — How small can a diffusion U-Net get before quality degrades? Is uniform pruning sufficient, or do different timesteps need different network capacity?
+**1. Train longer (50K-100K steps).** The #1 priority. CFG fails because the model is undertrained. Resume from the 30K checkpoint and see if the conditional/unconditional gap develops with more training.
 
-**Knowledge distillation** — Can a 4M-parameter student match a 20M-parameter teacher on Fashion-MNIST? What distillation loss works best for diffusion?
+**2. CFG diagnostic.** Directly measure ε_cond vs ε_uncond during inference. If they're nearly identical, it confirms the hypothesis. If they diverge, the problem is elsewhere.
 
-**Scaling studies** — How does sample quality scale with model size, training compute, and dataset size on this stack?
+**3. Reduce FID feature dimension to 32.** Quick fix that makes FID reliable at practical sample sizes.
 
-**FID evaluation pipeline** — The most urgent missing piece. Until we can measure quality objectively, every other experiment is running blind.
+**4. Unconditional baseline comparison.** Generate 500+ samples from both models with DDIM-50 and compare FID properly. If unconditional FID ≈ conditional FID at w=3.0, it confirms the model is ignoring the class label.
 
-Each of these is a new directory under `methods/`, a new set of experiments under `experiments/`, and new decisions under `decisions/`. The harness is ready.
+**5. Cosine schedule.** Implemented but never used. Published results show it helps at fewer training steps.
 
 ---
 
@@ -342,8 +311,11 @@ This post covers the project at a high level. For the full technical details, se
 
 | Topic | Deep Dive |
 |-------|-----------|
-| Unconditional DDPM training | [Training a DDPM on Fashion-MNIST](artifacts/reports/fashion-mnist-diffusion-2026-04-23/fashion_mnist_diffusion.md) |
-| Class-conditional CFG training | [Class-Conditional Generation with CFG](artifacts/reports/class-conditional-fashionmnist-2026-04-23/class_conditional_diffusion.md) |
+| Unconditional DDPM training (30K steps) | [Training a DDPM on Fashion-MNIST](artifacts/reports/fashion-mnist-diffusion-2026-04-23/fashion_mnist_diffusion.md) |
+| Class-conditional CFG training (30K steps) | [Class-Conditional Generation with CFG](artifacts/reports/class-conditional-fashionmnist-2026-04-23/class_conditional_diffusion.md) |
+| DDIM 20x speedup | [DDIM Sampling Report](artifacts/reports/ddim-sampling-2026-05/ddim_sampling.md) |
+| FID reliability analysis | [FID Evaluation Report](artifacts/reports/fid-evaluation-2026-05/fid_evaluation.md) |
+| CFG failure analysis | [Guidance Sweep Report](artifacts/reports/guidance-sweep-2026-05/guidance_sweep.md) |
 | TPU operations | [Keras Kinetic TPU Field Notes](artifacts/reports/keras_kinetic_tpu_field_notes.md) |
 | Practical tips | [Engineering Tips](artifacts/reports/engineering_tips.md) |
 | Research directions | [Diffusion Research Axes 2026](artifacts/reports/diffusion_research_axes_2026.md) |
@@ -352,9 +324,11 @@ This post covers the project at a high level. For the full technical details, se
 
 1. Ho, Jain & Abbeel (2020). "Denoising Diffusion Probabilistic Models." NeurIPS 2020.
 2. Ho & Salimans (2022). "Classifier-Free Diffusion Guidance." NeurIPS 2021 Workshop.
-3. Nichol & Dhariwal (2021). "Improved Denoising Diffusion Probabilistic Models." ICML 2021.
-4. Perez et al. (2018). "FiLM: Visual Reasoning with a General Conditioning Layer." AAAI 2018.
-5. Rombach et al. (2022). "High-Resolution Image Synthesis with Latent Diffusion Models." CVPR 2022.
+3. Song, Meng & Ermon (2021). "Denoising Diffusion Implicit Models." ICLR 2021.
+4. Nichol & Dhariwal (2021). "Improved Denoising Diffusion Probabilistic Models." ICML 2021.
+5. Heusel et al. (2017). "GANs Trained by a Two Time-Scale Update Rule Converge to a local Nash equilibrium." NeurIPS 2017.
+6. Perez et al. (2018). "FiLM: Visual Reasoning with a General Conditioning Layer." AAAI 2018.
+7. Rombach et al. (2022). "High-Resolution Image Synthesis with Latent Diffusion Models." CVPR 2022.
 
 ---
 
