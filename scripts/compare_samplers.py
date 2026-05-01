@@ -78,6 +78,8 @@ def _run_conditional(args, schedule, has_metrics,
     from diffusion_harness.methods.class_conditional.models import build_cond_unet
     from diffusion_harness.methods.class_conditional.sampling import CFGSampler
     from diffusion_harness.methods.class_conditional.ddim_sampling import CFGDDIMSampler
+    from diffusion_harness.base.sampling import save_image_grid
+    from diffusion_harness.metrics.fid import extract_features, compute_fid_from_stats
 
     model = build_cond_unet(
         image_size=28, channels=1, base_filters=128,
@@ -184,7 +186,7 @@ def _run_conditional(args, schedule, has_metrics,
 def _run_unconditional(args, schedule):
     """Run comparison for unconditional model."""
     from diffusion_harness.base.models import build_unet
-    from diffusion_harness.base.sampling import BaseSampler
+    from diffusion_harness.base.sampling import BaseSampler, save_image_grid
     from diffusion_harness.base.ddim_sampling import DDIMSampler
 
     model = build_unet(
